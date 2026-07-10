@@ -1,0 +1,26 @@
+# 依赖与构建产物
+node_modules
+dist
+dist-ssr
+src-tauri/target
+target
+*.local
+
+# 日志
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.idea
+.vscode/*
+!.vscode/extensions.json
+
+# 本地项目记忆（含会话日志，非源码，默认不入库；如需共享请显式告知）
+.workbuddy/
+
+# 临时
+*.tmp

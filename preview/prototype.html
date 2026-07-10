@@ -1,0 +1,1439 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>VideosFlow · 三大模块原型预览（升级版）</title>
+<style>
+  :root{
+    --bg:#f5f6f8; --panel:#fff; --line:#e6e8eb; --line2:#eef0f3;
+    --text:#1f2430; --muted:#8a909c; --muted2:#b4b9c2;
+    --accent:#4f6bff; --accent-soft:#eef1ff; --accent-d:#3a52e0;
+    --ok:#16a34a; --warn:#f59e0b; --bad:#ef4444; --purple:#8b5cf6;
+    --gap:#f59e0b; --mistake:#ef4444; --repeat:#a855f7;
+    --radius:10px; --shadow:0 1px 3px rgba(20,30,60,.06),0 6px 18px rgba(20,30,60,.06);
+    --video-bg:#161a22;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    background:var(--bg);color:var(--text);font-size:13px;display:flex;flex-direction:column;overflow:hidden}
+  button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+  .btn{background:var(--accent);color:#fff;padding:7px 14px;border-radius:8px;font-size:12.5px;font-weight:600;
+    display:inline-flex;align-items:center;gap:6px;transition:.15s}
+  .btn:hover{background:var(--accent-d)}
+  .btn.ghost{background:var(--panel);color:var(--text);border:1px solid var(--line);box-shadow:var(--shadow)}
+  .btn.ghost:hover{background:var(--line2)}
+  .btn.sm{padding:4px 10px;font-size:12px}
+  .btn.ok{background:var(--ok)}
+  .btn.ok:hover{background:#128a3f}
+  .btn.bad{background:var(--bad)}
+  .btn.bad:hover{background:#cc2f2f}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .tag{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600}
+  .tag.key{background:#ecfdf5;color:#059669}
+  .tag.spoken{background:#eff6ff;color:#2563eb}
+  .tag.ai{background:#fdf4ff;color:#a21caf}
+  .tag.gen{background:#eef2ff;color:#4f46e5}
+  .tag.done{background:#ecfdf5;color:#059669}
+  .tag.gap{background:#fff7ed;color:var(--gap)}
+  .tag.mis{background:#fef2f2;color:var(--mistake)}
+  .tag.rep{background:#faf5ff;color:var(--repeat)}
+
+  header{height:54px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;
+    padding:0 16px;gap:16px;flex-shrink:0}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:800;font-size:15px}
+  .brand .logo{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,#4f6bff,#8b5cf6);
+    display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px}
+  .proj{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12.5px;border:1px solid var(--line);
+    padding:5px 10px;border-radius:8px;background:var(--bg)}
+  .modtabs{display:flex;gap:6px;margin-left:8px}
+  .modtab{display:flex;align-items:center;gap:7px;padding:7px 16px;border-radius:9px;font-weight:700;color:var(--muted);
+    border:1px solid transparent;transition:.15s}
+  .modtab .ic{font-size:15px}
+  .modtab:hover{color:var(--text);background:var(--line2)}
+  .modtab.active{background:var(--accent);color:#fff;box-shadow:var(--shadow)}
+
+  .body{flex:1;display:flex;min-height:0}
+  .left{width:240px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;flex-shrink:0}
+  .lp-head{padding:12px 14px;font-weight:700;font-size:12px;color:var(--muted);display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line2)}
+  .left .scroll{flex:1;overflow:auto;padding:10px}
+
+  .center{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg)}
+  .stage-head{padding:13px 18px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .stage-head .top{display:flex;align-items:center;justify-content:space-between}
+  .stage-head h2{margin:0;font-size:15px}
+  .stage-head .desc{color:var(--muted);font-size:12px;margin-top:3px}
+  .substep{display:flex;gap:4px;margin-top:12px;flex-wrap:wrap}
+  .ss{padding:5px 11px;border-radius:999px;font-size:11.5px;font-weight:600;color:var(--muted);background:var(--line2);display:flex;gap:6px;align-items:center}
+  .ss.active{background:var(--accent-soft);color:var(--accent-d)}
+  .ss.done{background:#ecfdf5;color:#059669}
+  .stage-body{flex:1;overflow:auto;padding:18px}
+
+  .right{width:296px;background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;flex-shrink:0}
+  .rp-head{padding:12px 14px;font-weight:700;font-size:12px;color:var(--muted);border-bottom:1px solid var(--line2)}
+  .rp-body{padding:14px;overflow:auto;flex:1;display:flex;flex-direction:column;gap:12px}
+
+  footer{height:46px;background:var(--panel);border-top:1px solid var(--line);display:flex;align-items:center;
+    padding:0 14px;gap:14px;flex-shrink:0}
+  .transport{display:flex;align-items:center;gap:8px}
+  .tbtn{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;background:var(--line2);color:var(--text)}
+  .tbtn.play{background:var(--accent);color:#fff}
+  .time{font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px}
+  .prog{flex:1;height:6px;background:var(--line2);border-radius:999px;overflow:hidden}
+  .prog>i{display:block;height:100%;width:64%;background:var(--accent);transition:width .3s}
+  .tasklabel{font-size:11.5px;color:var(--muted)}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+  .grid{display:grid;gap:14px}
+  .muted{color:var(--muted)}
+  .sec-title{font-weight:700;font-size:13px;margin:0 0 10px}
+  .pill{font-size:11px;color:var(--muted);border:1px solid var(--line);padding:3px 9px;border-radius:999px;background:var(--bg)}
+
+  /* film */
+  .cat{display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:9px;cursor:pointer;transition:.15s}
+  .cat:hover{background:var(--line2)}
+  .cat.active{background:var(--accent-soft);color:var(--accent-d);font-weight:700}
+  .cat .nm{flex:1}
+  .cat .ct{font-size:11px;color:var(--muted);background:var(--line2);border-radius:999px;padding:1px 8px}
+  .cat .ed{font-size:11px;color:var(--muted2);opacity:0;transition:.15s}
+  .cat:hover .ed{opacity:1}
+  .proj-card{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--panel);box-shadow:var(--shadow);cursor:pointer;transition:.15s}
+  .proj-card:hover{border-color:var(--accent)}
+  .proj-card .cv{aspect-ratio:16/9;background:linear-gradient(135deg,#1f2430,#2d3340);display:flex;align-items:center;justify-content:center;color:#6b7280;font-size:13px;position:relative}
+  .proj-card .cb{padding:9px 11px}
+  .proj-card .pt{font-weight:600;font-size:12.5px}
+  .proj-card .ps{font-size:11px;margin-top:2px}
+
+  /* spoken */
+  .drop{border:2px dashed var(--line);border-radius:12px;padding:34px;text-align:center;color:var(--muted);background:var(--panel)}
+  .drop .big{font-size:30px;margin-bottom:8px}
+  .sv{display:flex;gap:10px;padding:10px;border:1px solid var(--line);border-radius:9px;margin-bottom:8px;background:var(--panel);cursor:pointer}
+  .sv:hover{border-color:var(--accent);background:var(--accent-soft)}
+  .sv .vb{width:54px;height:38px;border-radius:6px;background:var(--video-bg);display:flex;align-items:center;justify-content:center;color:#6b7280;flex-shrink:0}
+  .sv .nm{font-weight:600;font-size:12.5px}
+  .sv .sub{color:var(--muted);font-size:11px;margin-top:2px}
+  .wave{display:flex;align-items:flex-end;gap:2px;height:64px;padding:8px;background:var(--video-bg);border-radius:10px}
+  .wave i{flex:1;background:linear-gradient(180deg,#4f6bff,#8b5cf6);border-radius:2px;opacity:.85}
+  .asset-list{display:flex;flex-wrap:wrap;gap:8px}
+  .asset-chip{display:inline-flex;align-items:center;gap:6px;padding:5px 9px;border:1px solid var(--line);border-radius:999px;font-size:12px;background:#fff}
+  .asset-chip .at{font-size:11px}
+  .asset-chip .ax{color:#ef4444;cursor:pointer;font-size:11px;margin-left:2px}
+  .m-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line2);font-size:12.5px}
+  .m-row .m-seg{font-variant-numeric:tabular-nums;font-weight:600;color:var(--accent-d);width:36px;flex-shrink:0}
+  .m-row .m-text{color:var(--fg);flex:1;min-width:0}
+  .m-row .m-kw{color:var(--muted);white-space:nowrap}
+  .m-row .m-asset{color:#4f6bff;background:#eef2ff;padding:3px 8px;border-radius:6px;white-space:nowrap}
+  .m-row .acts{margin-left:auto;flex-shrink:0}
+  .mix-track{display:flex;align-items:center;gap:10px;margin-top:8px}
+  .mix-lbl{font-size:11.5px;color:var(--muted);white-space:nowrap;width:46px;flex-shrink:0}
+  .mix-track .wave{flex:1;height:46px;padding:6px 8px}
+  .mix-track .wave.orig i{background:linear-gradient(180deg,#9ca3af,#6b7280)}
+  .mix-track .wave.narr i{background:linear-gradient(180deg,#4f6bff,#8b5cf6)}
+  .tr-line{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--line2)}
+  .tr-line .t{font-variant-numeric:tabular-nums;color:var(--accent-d);font-weight:600;width:40px;flex-shrink:0}
+  .tr-line .x{flex:1;line-height:1.5}
+  .tr-line .x .hl{background:#fde68a;border-radius:3px;padding:0 2px}
+  .tr-line .x .kw{background:#fee2e2;color:var(--bad);border-radius:3px;padding:0 4px;font-weight:700}
+  .tr-line .x .flw{background:linear-gradient(180deg,#fbbf24,#f59e0b);color:#fff;border-radius:4px;padding:1px 6px;font-weight:800;letter-spacing:.5px;box-shadow:0 1px 0 rgba(0,0,0,.1)}
+  .tr-line .x .flw.emo{background:linear-gradient(180deg,#f472b6,#a855f7)}
+  .tr-line .x .flw.kw{background:linear-gradient(180deg,#fafafa,#e5e7eb);color:#1f2430;border:1px solid var(--line);text-shadow:none}
+
+  /* creation */
+  .field{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
+  .field label{font-size:11.5px;color:var(--muted);font-weight:600}
+  .field textarea,.field input,.field select{padding:9px 11px;border:1px solid var(--line);border-radius:8px;font-size:12.5px;background:var(--bg);color:var(--text);font-family:inherit;resize:vertical}
+  .field textarea:focus,.field input:focus,.field select:focus{outline:none;border-color:var(--accent);background:#fff}
+  .script-box{border:1px solid var(--line);border-radius:10px;padding:14px;background:var(--panel);line-height:1.8;font-size:13px;white-space:pre-wrap}
+  .shot{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);overflow:hidden;box-shadow:var(--shadow);margin-bottom:12px}
+  .shot .body{padding:11px 13px}
+  .shot .idx{font-weight:800;font-size:13px;display:flex;align-items:center;gap:8px;margin-bottom:5px}
+  .shot .desc{color:var(--muted);font-size:12px;line-height:1.55}
+  .shot .meta{display:flex;gap:10px;margin-top:7px;font-size:11px;color:var(--muted)}
+  .gen-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+  .frame-card{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--panel)}
+  .frame-card .fr{height:120px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;position:relative}
+  .frame-card .fr .lab{position:absolute;top:6px;left:8px;background:rgba(0,0,0,.4);padding:1px 8px;border-radius:999px;font-size:10px}
+  .frame-card .fr.empty{background:repeating-linear-gradient(45deg,#1f2430,#1f2430 10px,#262b36 10px,#262b36 20px);color:#9aa3b2}
+  .frame-card .fb{padding:9px 11px;display:flex;justify-content:space-between;align-items:center}
+  .style-ref{border:1px dashed var(--accent);border-radius:9px;padding:11px;background:var(--accent-soft);display:flex;gap:11px;align-items:center;margin-bottom:14px}
+  .style-ref .ri{width:52px;height:52px;border-radius:8px;background:linear-gradient(135deg,#f472b6,#a855f7);flex-shrink:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:10px}
+  .style-chips{display:flex;gap:7px;flex-wrap:wrap}
+  .schip{font-size:12.5px;padding:5px 13px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--ink);cursor:pointer;font-family:inherit;transition:.15s}
+  .schip:hover{border-color:var(--accent)}
+  .schip.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
+  .sub-row{display:flex;gap:10px;padding:9px 12px;border-bottom:1px solid var(--line2);align-items:center}
+  .sub-row .st{font-variant-numeric:tabular-nums;color:var(--accent-d);font-weight:600;width:70px;flex-shrink:0}
+  .preview-box{background:var(--video-bg);border-radius:10px;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;color:#6b7280;font-size:13px;position:relative;overflow:hidden}
+  .preview-box .pbar{position:absolute;bottom:0;left:0;height:3px;background:var(--accent);width:0%}
+  .kpis{display:flex;gap:10px;margin-bottom:14px}
+  .kpi{flex:1;border:1px solid var(--line);border-radius:9px;padding:10px 12px;background:var(--panel)}
+  .kpi .v{font-size:18px;font-weight:800}
+  .kpi .l{font-size:11px;color:var(--muted);margin-top:2px}
+  .ol{display:flex;flex-direction:column;gap:2px}
+  .ol .it{display:flex;gap:9px;padding:8px 9px;border-radius:8px;font-size:12px;color:var(--muted)}
+  .ol .it .n{width:18px;height:18px;border-radius:50%;background:var(--line2);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0}
+  .ol .it.active{background:var(--accent-soft);color:var(--accent-d);font-weight:700}
+  .ol .it.done{color:var(--ok)}
+  .ol .it.done .n{background:var(--ok);color:#fff}
+  .empty-hint{padding:40px;text-align:center;color:var(--muted);font-size:13px}
+  /* 创作模块新增 */
+  .mini{font-size:12px;padding:3px 7px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--ink);font-family:inherit}
+  .shot .idx{display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap}
+  .ed-row{display:flex;gap:8px;align-items:flex-start;margin-top:6px}
+  .ed-row label{font-size:11px;color:var(--muted);width:30px;flex-shrink:0;line-height:26px}
+  .ed{flex:1;font-size:12.5px;line-height:1.5;border:1px solid var(--line);border-radius:7px;padding:5px 8px;resize:vertical;font-family:inherit;color:var(--ink);background:#fff}
+  .ref-thumbs{display:flex;flex-direction:column;gap:8px;padding:0 11px 10px}
+  .ref-group{display:flex;flex-direction:column;gap:5px}
+  .ref-g-label{font-size:11px;font-weight:700;color:var(--accent-d)}
+  .ref-row{display:flex;gap:6px;flex-wrap:wrap}
+  .ref-thumb{position:relative;width:54px;height:54px;border-radius:7px;overflow:hidden;border:1px solid var(--line)}
+  .ref-thumb img{width:100%;height:100%;object-fit:cover}
+  .ref-thumb .rcat{position:absolute;bottom:0;left:0;right:0;width:100%;border:none;font-size:9px;background:rgba(0,0,0,.6);color:#fff;padding:1px 2px}
+  .ref-thumb .x{position:absolute;top:1px;right:1px;width:16px;height:16px;border:none;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;font-size:11px;line-height:1;cursor:pointer}
+  .voice-list{display:flex;flex-direction:column;gap:7px;margin:6px 0}
+  .voice-item{display:flex;align-items:center;gap:12px;padding:7px 10px;border:1px solid var(--line);border-radius:9px;background:var(--panel)}
+  .voice-item.on{border-color:var(--accent);background:var(--accent-soft)}
+  .voice-item .vc{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer}
+  .voice-item .ip-in{font-size:11px;color:var(--muted)}
+
+  /* ===== 影片剪辑台 ===== */
+  .edit-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .video-stub{aspect-ratio:16/9;background:linear-gradient(135deg,#1f2430,#2d3340);border-radius:9px;display:flex;align-items:center;justify-content:center;color:#9aa3b2;font-size:13px}
+  .align-progress{height:8px;background:var(--line2);border-radius:999px;overflow:hidden;margin:10px 0}
+  .align-progress>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--purple));transition:width .4s}
+  .seg-card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--panel);display:flex;gap:10px;align-items:center;margin-bottom:8px}
+  .seg-card .ti{font-variant-numeric:tabular-nums;color:var(--accent-d);font-weight:700;width:90px;flex-shrink:0;font-size:12px}
+  .seg-card .tx{flex:1;font-size:12.5px;line-height:1.5}
+  .seg-card .dr{font-variant-numeric:tabular-nums;color:var(--muted);font-size:11px;width:60px;text-align:right;flex-shrink:0}
+  .seg-card .kept{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ok)}
+  .seg-card.dropped{opacity:.5;text-decoration:line-through;color:var(--muted)}
+  .track-row{display:grid;grid-template-columns:74px 1fr;gap:10px;align-items:center;margin-bottom:8px}
+  .track-row .lab{font-size:12px;color:var(--muted);font-weight:600}
+  .track{display:flex;gap:3px;background:var(--line2);border-radius:7px;padding:5px;min-height:42px;overflow-x:auto;position:relative}
+  .track.gen .block{background:linear-gradient(135deg,#a855f7,#6366f1)}
+  .track.video .block{background:linear-gradient(135deg,#3b82f6,#1d4ed8)}
+  .track.audio .block{background:linear-gradient(135deg,#10b981,#059669)}
+  .track.sub .block{background:linear-gradient(135deg,#f59e0b,#d97706)}
+  .block{padding:6px 8px;border-radius:5px;color:#fff;font-size:11px;cursor:pointer;transition:.15s;flex-shrink:0;display:flex;align-items:center;font-weight:600;white-space:nowrap;overflow:hidden}
+  .block:hover{transform:translateY(-1px);box-shadow:0 4px 10px rgba(0,0,0,.15)}
+  .block.selected{outline:2px solid var(--accent);outline-offset:1px}
+  .flow-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .flow-card{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:10px;cursor:pointer;transition:.15s}
+  .flow-card:hover{border-color:var(--accent)}
+  .flow-card.active{border-color:var(--accent);background:var(--accent-soft);box-shadow:0 0 0 2px var(--accent-soft)}
+  .flow-card .pt{font-weight:700;font-size:12.5px;margin-bottom:6px;display:flex;align-items:center;gap:6px}
+  .flow-card .pp{border-radius:6px;padding:6px 8px;font-size:12px;line-height:1.4}
+  .flow-card .ds{font-size:11px;color:var(--muted);margin-top:6px}
+  .flow-card .pp.emphasis{background:linear-gradient(180deg,#fbbf24,#f59e0b);color:#fff;font-weight:700;text-shadow:0 1px 0 rgba(0,0,0,.2)}
+  .flow-card .pp.emotion{background:linear-gradient(180deg,#f472b6,#a855f7);color:#fff;font-weight:700}
+  .flow-card .pp.shout{background:#ef4444;color:#fff;font-weight:900;letter-spacing:1px;text-shadow:0 1px 0 rgba(0,0,0,.3)}
+  .flow-card .pp.keyword{background:#fff;border:1px solid var(--text);color:var(--text);font-weight:700;display:inline-block}
+  .flow-card .pp.underline{background:#fff;color:var(--accent-d);font-weight:700;border-bottom:3px solid var(--accent)}
+  .flow-card .pp.shake{background:#fff;color:var(--bad);font-weight:700;font-style:italic;border:1px dashed var(--bad)}
+
+  /* ===== 口播纠正 ===== */
+  .iss-stat{display:flex;gap:10px;margin-bottom:14px}
+  .iss-stat .stat{flex:1;border:1px solid var(--line);border-radius:9px;padding:10px 12px;background:var(--panel);border-left:3px solid var(--line)}
+  .iss-stat .stat.gap{border-left-color:var(--gap)}
+  .iss-stat .stat.mis{border-left-color:var(--mistake)}
+  .iss-stat .stat.rep{border-left-color:var(--repeat)}
+  .iss-stat .stat.acc{border-left-color:var(--ok)}
+  .iss-row{border:1px solid var(--line);border-radius:10px;padding:11px 13px;background:var(--panel);margin-bottom:8px;display:grid;grid-template-columns:74px 70px 1fr auto;gap:10px;align-items:center}
+  .iss-row .ti{font-variant-numeric:tabular-nums;color:var(--accent-d);font-weight:700;font-size:12px}
+  .iss-row .tx{font-size:12.5px;line-height:1.5}
+  .iss-row .tx del{color:var(--bad);opacity:.7}
+  .iss-row .tx ins{color:var(--ok);text-decoration:none;background:#dcfce7;border-radius:3px;padding:0 4px;font-weight:600}
+  .iss-row .acts{display:flex;gap:6px}
+  .iss-row.accepted{background:#f0fdf4;border-color:#86efac}
+  .iss-row.ignored{opacity:.45}
+
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:#d4d8df;border-radius:9px}
+  ::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand"><span class="logo">V</span>VideosFlow</div>
+  <div class="proj">📁 我的工作台 <span class="muted">▾</span></div>
+  <nav class="modtabs" id="modtabs"></nav>
+  <button class="btn" id="exportBtn" style="margin-left:auto">⬇ 导出</button>
+</header>
+
+<div class="body">
+  <aside class="left">
+    <div class="lp-head" id="lpHead"><span>面板</span></div>
+    <div class="scroll" id="leftScroll"></div>
+  </aside>
+
+  <main class="center">
+    <div class="stage-head">
+      <div class="top">
+        <div><h2 id="stageTitle"></h2><div class="desc" id="stageDesc"></div></div>
+        <div id="stageActions"></div>
+      </div>
+      <div class="substep" id="substep"></div>
+    </div>
+    <div class="stage-body" id="stageBody"></div>
+  </main>
+
+  <aside class="right">
+    <div class="rp-head" id="rpTitle">属性</div>
+    <div class="rp-body" id="rpBody"></div>
+  </aside>
+</div>
+
+<footer>
+  <div class="transport">
+    <button class="tbtn">⏮</button><button class="tbtn play">▶</button><button class="tbtn">⏭</button>
+  </div>
+  <span class="time">00:00:00 / --:--</span>
+  <div class="prog"><i id="progBar"></i></div>
+  <span class="tasklabel" id="taskLabel">空闲</span>
+</footer>
+
+<script>
+/* ---------------- 状态 ---------------- */
+const modules=[
+  {id:'film',ic:'🎬',name:'影片'},
+  {id:'spoken',ic:'🎙',name:'口播'},
+  {id:'creation',ic:'✨',name:'创作视频'},
+  {id:'settings',ic:'⚙',name:'设置'},
+];
+const settingsSteps=[
+  {id:'api',name:'①模型API'},
+  {id:'prompt',name:'②提示词'},
+  {id:'other',name:'③其他参数'},
+];
+const cSteps=[
+  {id:'req',name:'需求'},{id:'script',name:'文案'},{id:'human',name:'去AI味'},
+  {id:'story',name:'分镜'},{id:'image',name:'图片'},{id:'frames',name:'首尾帧视频'},
+  {id:'voice',name:'配音+字幕'},{id:'export',name:'导出'},
+];
+const filmSteps=[
+  {id:'library',name:'工程库'},
+  {id:'editor',name:'剪辑台'},
+];
+const editorSteps=[
+  {id:'gen',name:'①生成解说文案'},
+  {id:'align',name:'②导入对齐'},
+  {id:'voice',name:'③解说配音'},
+  {id:'cut',name:'④自动切点'},
+  {id:'time',name:'⑤时间线精修'},
+  {id:'out',name:'⑥字幕花字导出'},
+];
+const spokenSteps=[
+  {id:'upload',name:'①上传'},{id:'tr',name:'②识别'},{id:'fix',name:'③纠正'},{id:'match',name:'④匹配素材'},{id:'flw',name:'⑤花字字幕'},
+];
+const flowerTpls=[
+  {id:'emphasis',name:'重点强调',desc:'黄底加粗',cls:'emphasis',demo:'关键词'},
+  {id:'emotion',name:'情绪渲染',desc:'粉紫渐变',cls:'emotion',demo:'感慨一下'},
+  {id:'shout',name:'强烈感叹',desc:'红色大字',cls:'shout',demo:'注意！'},
+  {id:'keyword',name:'关键词描边',desc:'白底边框',cls:'keyword',demo:'新产品'},
+  {id:'underline',name:'重点下划线',desc:'蓝色加下划线',cls:'underline',demo:'核心点'},
+  {id:'shake',name:'警示抖动',desc:'红色虚框',cls:'shake',demo:'别忘了'},
+];
+
+let module='film';
+let filmCat='c1';
+let filmStage='library';        // library | editor
+let editorSub='align';          // align | cut | time | out
+let editingProj=null;           // {cat, t}
+let selectedClip=null;          // 当前选中时间线片段
+let spokenSel=null;
+let spokenStage='upload';
+let cStage='req';
+const stylePresets={
+  '现实':{tone:'自然写实·暖色',font:'无衬线',cam:'平实推进'},
+  '科幻':{tone:'冷蓝紫·霓虹',font:'科技感几何',cam:'推拉摇移'},
+  '卡通':{tone:'明快多彩',font:'圆体卡通',cam:'弹性运镜'},
+  '写实':{tone:'高对比·胶片感',font:'衬线',cam:'固定长镜'},
+  '动漫':{tone:'二次元·高饱和',font:'手写感',cam:'分镜式切'},
+  '水彩':{tone:'淡彩晕染',font:'手写体',cam:'缓慢平移'},
+};
+const refCats=['IP形象','场景','产品','风格','材质','其他'];
+let cState={script:'',human:'',story:[],imgs:{},frames:{},voice:{},subs:[],refs:{},voices:[],humanPrompt:'humanize',styleRef:'现实',refCat:{}};
+let settingsSub='api';          // api | prompt | other
+
+/* 系统配置 */
+let settingsState={
+  providers:{
+    llm:{name:'文字大模型',provider:'OpenAI 兼容',baseUrl:'https://api.openai.com/v1',apiKey:'sk-************M2vN',model:'gpt-4o-mini',enabled:true,test:'ok'},
+    img:{name:'图片大模型',provider:'通义万相',baseUrl:'https://dashscope.aliyuncs.com/api/v1',apiKey:'sk-************tPx8',model:'wanx-v1',enabled:true,test:'ok'},
+    asr:{name:'语音识别',provider:'本地 faster-whisper',baseUrl:'',apiKey:'',model:'medium',enabled:true,test:'local'},
+    tts:{name:'语音合成',provider:'Edge-TTS',baseUrl:'',apiKey:'',model:'zh-CN-XiaoxiaoNeural',enabled:true,test:'ok'},
+    video:{name:'视频大模型',provider:'Runway / 通义万相',baseUrl:'',apiKey:'sk-************aB91',model:'gen-3',enabled:false,test:'idle'},
+  },
+  prompts:{
+    script:{name:'自动写文案',body:'请你担任资深短视频文案，根据以下需求撰写一份适合配音的画面感文案，长度约 60-80 字，语气自然：\n\n需求：{{brief}}\n风格：{{style}}\n受众：{{audience}}',placeholder:'{{brief}}\n{{style}}\n{{audience}}'},
+    humanize:{name:'去 AI 味',body:'请你把以下文案改写成自然口语，去掉 AI 套话与空泛表达，加具体细节、停顿感与生活化比喻，保持原意：\n\n{{script}}',placeholder:'{{script}}'},
+    storyboard:{name:'生成分镜',body:'请将以下文案拆为 4-6 个镜头，每个镜头给出：画面描述、台词、时长秒、运镜建议，JSON 数组返回：\n\n{{script}}',placeholder:'{{script}}'},
+    narration:{name:'解说文案',body:'请你为以下视频撰写一段解说稿，画面感强、有节奏、可二次编辑，分段输出：\n\n视频：{{title}}\n风格：{{style}}',placeholder:'{{title}}\n{{style}}'},
+    detect:{name:'口误检测',body:'请找出以下口播转写中的【口误/卡顿/重复/不流畅】，按 JSON 数组返回，含 issue_type / start / end / suggestion / text：\n\n{{transcript}}',placeholder:'{{transcript}}'},
+    keywords:{name:'重点抽取',body:'请从以下文案中抽取 5-8 个值得在字幕中高亮/花字强调的关键词或短句，JSON 数组：\n\n{{script}}',placeholder:'{{script}}'},
+  },
+  promptEditing:'script',
+  other:{
+    theme:'浅色',lang:'简体中文',hwAccel:true,exportResolution:'1920×1080',exportFormat:'MP4 (H.264)',
+    taskConcurrency:2,autoSave:true,autoSaveSec:30,cleanupDays:30,
+    ffmpegPath:'(自动检测)',tempDir:'./data/tmp',
+  },
+};
+
+const $=s=>document.querySelector(s);
+function setTask(label,p){$('#taskLabel').textContent=label;if(p>=0)$('#progBar').style.width=p+'%';}
+
+/* ---------------- 影片数据 ---------------- */
+let filmCats=[
+  {id:'c1',name:'电影',n:3},{id:'c2',name:'故事',n:2},{id:'c3',name:'电视剧',n:1},
+  {id:'c4',name:'动画片',n:4},{id:'c5',name:'记录片',n:2},
+];
+let filmProjects={
+  c1:[{t:'城市之光',s:'已发布'},{t:'归途',s:'草稿'},{t:'暗涌',s:'草稿'}],
+  c2:[{t:'外婆的菜园',s:'已发布'},{t:'雨夜书店',s:'草稿'}],
+  c3:[{t:'长河',s:'制作中'}],
+  c4:[{t:'喵星日记',s:'已发布'},{t:'齿轮王国',s:'已发布'},{t:'云朵工厂',s:'草稿'},{t:'小灯塔',s:'已发布'}],
+  c5:[{t:'候鸟',s:'已发布'},{t:'匠心',s:'制作中'}],
+};
+
+/* 当前编辑工程的 mock 状态 */
+let editorState={
+  videoName:'旅行 vlog 原始素材.mp4',
+  imported:false,
+  script:`第一段，开场我走在这条老街上，阳光打在青石板上。\n第二段，转角有家老店，老板正在煮面，热气腾腾。\n第三段，我点了一碗面，尝一口，嘴角上扬。\n第四段，结尾我坐在窗边，看着行人，写一段话。`,
+  aligned:false, alignedPct:0,
+  cuts:null,        // [{t1,t2,tx,dur,kept}]
+  clips:null,       // [{id,track,start,end,label}]
+  flower:'emphasis',
+};
+
+/* ---------------- 口播数据 ---------------- */
+let spokenVideos=[
+  {id:'v1',name:'产品介绍口播.mp4',dur:'03:24',
+   tr:[
+    {t:'0:00',x:'大家好，今天给大家介绍我们的新产品 VideosFlow。'},
+    {t:'0:03',x:'那个，它是一款，呃，基于 AI 的智能视频剪辑工具。'},
+    {t:'0:08',x:'可以自动根据文案，根据文案剪辑视频。'},
+    {t:'0:12',x:'还能修掉口播里的气口和口误，提升观感。'},
+    {t:'0:17',x:'那个，那个，大家记得点赞关注哦。'},
+    {t:'0:22',x:'还能修掉口播里的气口和口误，提升观感。'},
+   ],
+   script:null,
+   keywords:['AI','智能','剪辑','气口','口误','重点'],
+   assets:[
+     {name:'产品截图.png',type:'image'},
+     {name:'背景音乐-BGM.mp3',type:'bgm'},
+     {name:'转场音效.wav',type:'sfx'},
+     {name:'品牌logo片段.mp4',type:'clip'},
+   ],
+   matchResults:null,
+   issues:[
+    {id:'i1',type:'gap',ti:'0:02-0:03',tx:'',suggestion:'气口 ~1.0s，删除'},
+    {id:'i2',type:'mistake',ti:'0:03',tx:'它是一款，呃，基于 AI',suggestion:'删除「呃」并合并'},
+    {id:'i3',type:'repeat',ti:'0:08',tx:'根据文案，根据文案剪辑视频',suggestion:'保留前半句，删除「根据文案」'},
+    {id:'i4',type:'mistake',ti:'0:12',tx:'修掉口播里的气口和口误',suggestion:'保持原样'},
+    {id:'i5',type:'gap',ti:'0:16-0:17',tx:'',suggestion:'气口 ~0.8s，删除'},
+    {id:'i6',type:'repeat',ti:'0:17',tx:'那个，那个，大家记得',suggestion:'保留一个「那个」'},
+    {id:'i7',type:'repeat',ti:'0:22',tx:'还能修掉口播里的气口和口误',suggestion:'与 0:12 重复，删除一段'},
+   ],
+  },
+];
+
+/* ---------------- 渲染：顶部模块 ---------------- */
+function renderModTabs(){
+  $('#modtabs').innerHTML=modules.map(m=>`
+    <div class="modtab ${m.id===module?'active':''}" data-m="${m.id}">
+      <span class="ic">${m.ic}</span>${m.name}</div>`).join('');
+  document.querySelectorAll('.modtab').forEach(el=>el.onclick=()=>goModule(el.dataset.m));
+}
+function goModule(m){module=m;renderAll();}
+
+/* ---------------- 渲染：左面板 ---------------- */
+function renderLeft(){
+  const head=$('#lpHead'), sc=$('#leftScroll');
+  if(module==='film'){
+    if(filmStage==='editor'){
+      head.innerHTML=`<button class="btn sm ghost" onclick="backToLibrary()">← 返回工程库</button>`;
+      const c=filmCats.find(x=>x.id===filmCat);
+      sc.innerHTML=`<div class="cat active"><span class="nm">${c.name}</span></div>
+        <div class="cat active"><span class="nm">${editingProj.t}</span><span class="tag done">编辑中</span></div>
+        <div class="muted" style="font-size:11.5px;padding:8px 4px;line-height:1.6">
+          工程已加载视频与文案，可走完四步：导入对齐 → 自动切点 → 时间线精修 → 字幕花字导出。
+        </div>`;
+    } else {
+      head.innerHTML=`<span>影片类型</span><button class="btn sm ghost" onclick="addCat()">+ 类型</button>`;
+      sc.innerHTML=filmCats.map(c=>`
+        <div class="cat ${c.id===filmCat?'active':''}" data-c="${c.id}">
+          <span class="nm">${c.name}</span><span class="ct">${c.n}</span>
+          <span class="ed" onclick="event.stopPropagation();renameCat('${c.id}')">✎</span>
+        </div>`).join('')
+        + `<button class="btn sm" style="width:100%;margin-top:8px" onclick="importFilm()">⬇ 导入影片</button>`
+        + `<div class="muted" style="font-size:11px;padding:8px 4px">类型可扩展/改名，后续持续增加</div>`;
+      sc.querySelectorAll('.cat').forEach(el=>el.onclick=()=>{filmCat=el.dataset.c;renderAll();});
+    }
+  } else if(module==='spoken'){
+    head.innerHTML=`<span>口播视频</span>`;
+    sc.innerHTML=spokenVideos.map(v=>`
+      <div class="sv" data-v="${v.id}">
+        <div class="vb">▶</div>
+        <div><div class="nm">${v.name}</div><div class="sub">${v.dur} · ${v.script?'已提取':'未提取'}</div></div>
+      </div>`).join('');
+    sc.querySelectorAll('.sv').forEach(el=>el.onclick=()=>{spokenSel=el.dataset.v;spokenStage='upload';renderAll();});
+  } else if(module==='creation'){
+    head.innerHTML=`<span>创作步骤</span>`;
+    sc.innerHTML=`<div class="ol">${cSteps.map(s=>{
+      const st=s.id===cStage?'active':(cSteps.findIndex(x=>x.id===cStage)>cSteps.findIndex(x=>x.id===s.id)?'done':'');
+      return `<div class="it ${st}" data-s="${s.id}"><span class="n">${cSteps.findIndex(x=>x.id===s.id)+1}</span>${s.name}</div>`;
+    }).join('')}</div>`;
+    sc.querySelectorAll('.it').forEach(el=>el.onclick=()=>{cStage=el.dataset.s;renderAll();});
+  } else if(module==='settings'){
+    head.innerHTML=`<span>配置分类</span>`;
+    sc.innerHTML=`<div class="ol">${settingsSteps.map(s=>{
+      const st=s.id===settingsSub?'active':(settingsSteps.findIndex(x=>x.id===settingsSub)>settingsSteps.findIndex(x=>x.id===s.id)?'done':'');
+      return `<div class="it ${st}" data-s="${s.id}"><span class="n">${settingsSteps.findIndex(x=>x.id===s.id)+1}</span>${s.name.replace(/^[①②③]/,'')}</div>`;
+    }).join('')}</div>
+      <div class="muted" style="font-size:11.5px;padding:8px 4px;line-height:1.5">
+        配置在系统启动时加载，<br>变更后即时生效。
+      </div>`;
+    sc.querySelectorAll('.it').forEach(el=>el.onclick=()=>{settingsSub=el.dataset.s;renderAll();});
+  }
+}
+window.addCat=function(){const n=prompt('新类型名称：');if(n){filmCats.push({id:'c'+Date.now(),name:n,n:0});renderAll();}};
+window.renameCat=function(id){const c=filmCats.find(x=>x.id===id);const n=prompt('改名：',c.name);if(n){c.name=n;renderAll();}};
+window.backToLibrary=function(){filmStage='library';editingProj=null;renderAll();};
+
+/* ---------------- 渲染：主区 ---------------- */
+function renderStage(){
+  const acts=$('#stageActions'),sub=$('#substep');sub.innerHTML='';
+  if(module==='film')renderFilm(acts,sub);
+  else if(module==='spoken')renderSpoken(acts,sub);
+  else if(module==='settings')renderSettings(acts,sub);
+  else renderCreation(acts,sub);
+  renderInspector();
+}
+
+/* ===== 影片 ===== */
+function renderFilm(acts,sub){
+  if(filmStage==='library'){
+    const c=filmCats.find(x=>x.id===filmCat);
+    $('#stageTitle').textContent='影片库 · '+c.name;
+    $('#stageDesc').textContent='按类型管理影片工程；点击卡片进入「剪辑台」（基于文案智能剪辑 + 时间线精修 + 字幕花字）';
+    acts.innerHTML=`<button class="btn sm ghost">+ 新建工程</button>`;
+    sub.innerHTML=filmSteps.map(s=>`<div class="ss ${s.id==='library'?'active':''}">${s.name}</div>`).join('');
+    const list=filmProjects[filmCat]||[];
+    const body=$('#stageBody');
+    if(!list.length){body.innerHTML=`<div class="empty-hint">该类型下还没有工程。</div>`;return;}
+    body.innerHTML=`<div class="grid" style="grid-template-columns:repeat(4,1fr)">${list.map(p=>`
+      <div class="proj-card" onclick="openEditor('${filmCat}','${p.t}')">
+        <div class="cv">▶ 预览</div>
+        <div class="cb"><div class="pt">${p.t}</div><div class="ps"><span class="tag ${p.s==='已发布'?'done':''}">${p.s}</span></div></div>
+      </div>`).join('')}</div>`;
+  } else {
+    $('#stageTitle').textContent='剪辑台 · '+editingProj.t;
+    $('#stageDesc').textContent='基于文案的智能剪辑：生成解说文案 → 导入对齐 → 解说配音 → 自动切点 → 时间线精修 → 字幕花字导出';
+    sub.innerHTML=filmSteps.map(s=>`<div class="ss ${s.id==='editor'?'active':''}">${s.name}</div>`).join('');
+    acts.innerHTML=`<button class="btn sm ghost" onclick="backToLibrary()">返回工程库</button>`;
+    renderEditorSub();
+  }
+}
+window.openEditor=function(cat,t){
+  editingProj={cat,t};
+  filmStage='editor';
+  editorSub='gen';
+  editorState={videoName:t+' · 原始素材.mp4',imported:false,script:editorState.script,narration:null,aligned:false,alignedPct:0,voiceGen:false,voiceLines:[],voiceMix:0.15,cuts:null,clips:null,flower:'emphasis'};
+  renderAll();
+};
+
+/* 剪辑台子视图 */
+function renderEditorSub(){
+  const body=$('#stageBody');
+  const subChips=`<div class="substep" id="editorSub">
+    ${editorSteps.map(s=>`<div class="ss ${s.id===editorSub?'active':(editorSteps.findIndex(x=>x.id===editorSub)>editorSteps.findIndex(x=>x.id===s.id)?'done':'')}" onclick="goEditorSub('${s.id}')">${s.name}</div>`).join('')}
+  </div>`;
+  body.innerHTML=subChips + `<div id="editorBody" style="margin-top:14px"></div>`;
+  const eb=$('#editorBody');
+  if(editorSub==='gen'){
+    eb.innerHTML=`<div class="edit-grid">
+      <div class="card" style="padding:14px">
+        <div class="sec-title">① 生成解说文案</div>
+        <div class="muted" style="font-size:12.5px;margin-bottom:10px;line-height:1.6">AI 根据所选电影/视频，自动生成一份可二次编辑的解说文案，作为后续对齐与剪辑的脚本基础。</div>
+        <div class="video-stub">▶ ${editorState.videoName}</div>
+        <div class="muted" style="font-size:11.5px;margin-top:8px">${editingProj.t} · 已挂载到剪辑台</div>
+        <button class="btn sm" id="genNarBtn" style="margin-top:12px" onclick="genNarration()" ${editorState.narration?'disabled':''}>⚡ 自动生成解说文案</button>
+        <div class="align-progress" id="narProg" style="display:none;margin-top:14px"><i style="width:0%"></i></div>
+        <div class="muted" id="narProgLabel" style="font-size:11.5px;margin-top:6px;display:none"></div>
+      </div>
+      <div class="card" style="padding:14px">
+        <div class="sec-title">解说文案（可编辑）</div>
+        <textarea id="narrationInput" style="width:100%;min-height:200px;padding:10px;border:1px solid var(--line);border-radius:8px;font-size:12.5px;background:${editorState.narration?'#fff':'var(--bg)'};font-family:inherit;resize:vertical" ${editorState.narration?'':'disabled'} placeholder="点击左边的「自动生成解说文案」，AI 将根据视频内容生成解说稿，可在此修改。">${editorState.narration?editorState.narration.replace(/</g,'&lt;'):''}</textarea>
+        <div class="muted" style="font-size:11.5px;margin-top:6px">生成后可在下一步与视频音轨对齐时间戳。</div>
+        <button class="btn" style="margin-top:12px" ${editorState.narration?'':'disabled'} onclick="goEditorSub('align')">下一步：导入对齐 →</button>
+      </div>
+    </div>`;
+  } else if(editorSub==='voice'){
+    const om=editorState.voiceMix||0.15, am=1-om;
+    const mk=amp=>editorState.voiceGen
+      ? Array.from({length:60}).map((_,i)=>`<i style="height:${Math.max(6,amp*(20+Math.abs(Math.sin(i*0.9))*70))}%"></i>`).join('')
+      : Array.from({length:60}).map(()=>`<i style="height:${Math.max(4,amp*8)}%"></i>`).join('');
+    const origWave=mk(om), narWave=mk(am);
+    eb.innerHTML=`<div class="muted" style="font-size:12.5px;margin-bottom:10px;line-height:1.6">③ 给影片/视频进行智能配音，字幕由配音时间戳自动生成，可逐段试听与调整。</div>
+    <div class="edit-grid">
+      <div class="card" style="padding:14px">
+        <div class="sec-title">配音控制</div>
+        <div class="field"><label>解说文案来源</label>
+          <textarea style="width:100%;min-height:120px;padding:10px;border:1px solid var(--line);border-radius:8px;font-size:12.5px;background:#fff;font-family:inherit;resize:vertical" id="voiceScript">${(editorState.narration||editorState.script||'').replace(/</g,'&lt;')}</textarea>
+        </div>
+        <div class="grid" style="grid-template-columns:1fr 1fr 1fr;gap:10px">
+          <div class="field"><label>音色</label><select id="voiceTone"><option>解说·沉稳男声</option><option>解说·磁性男声</option><option>解说·清澈女声</option><option>旁白·沉稳男声</option><option>方言·长沙</option></select></div>
+          <div class="field"><label>语速</label><select id="voiceSpeed"><option>0.9× 沉稳</option><option selected>1.0× 正常</option><option>1.1× 稍快</option><option>1.2× 紧凑</option></select></div>
+          <div class="field"><label>停顿</label><select id="voicePause"><option>自然停顿</option><option>段间停顿</option><option>紧凑</option></select></div>
+        </div>
+        <div class="sec-title" style="margin-top:16px">混音 · 原片原声占比</div>
+        <div class="muted" style="font-size:11.5px;margin-bottom:8px">控制成片里原始音轨与解说配音的音量占比，实时预览右栏双轨波形。</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:12px;color:var(--muted);white-space:nowrap">原声</span>
+          <input type="range" min="0" max="100" value="${Math.round((editorState.voiceMix||0.15)*100)}" oninput="setVoiceMix(this.value)" style="flex:1;accent-color:var(--blue)">
+          <span style="font-size:12px;color:var(--muted);white-space:nowrap">解说</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted);margin-top:6px">
+          <span>原片原声 <b style="color:var(--fg)">${Math.round((editorState.voiceMix||0.15)*100)}%</b></span>
+          <span>解说配音 <b style="color:var(--fg)">${100-Math.round((editorState.voiceMix||0.15)*100)}%</b></span>
+        </div>
+        <button class="btn sm ghost" style="margin-top:10px" onclick="previewMix()">🔈 预览混音</button>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="btn sm" id="doVoice" onclick="genVoiceForFilm()" ${editorState.voiceGen?'disabled':''}>🔊 智能配音 + 生成字幕</button>
+          <button class="btn sm ghost" ${editorState.voiceGen?'':'disabled'} onclick="reVoiceForFilm()">↻ 重新生成</button>
+        </div>
+        <div class="align-progress" id="voiceProg" style="display:none;margin-top:14px"><i style="width:0%"></i></div>
+        <div class="muted" id="voiceProgLabel" style="font-size:11.5px;margin-top:6px;display:none"></div>
+      </div>
+      <div class="card" style="padding:14px">
+        <div class="sec-title">混音预览（原声 / 解说 双轨）</div>
+        <div class="muted" style="font-size:11.5px;margin-bottom:6px">上行=原片原声（${Math.round(om*100)}%），下行=解说配音（${Math.round(am*100)}%），波形高度即当前音量占比。</div>
+        <div class="mix-track"><span class="mix-lbl">🎞 原声</span><div class="wave orig" style="height:34px;opacity:.7">${origWave}</div></div>
+        <div class="mix-track"><span class="mix-lbl">🎙 解说</span><div class="wave narr" style="height:34px">${narWave}</div></div>
+        <div class="muted" style="font-size:11.5px;margin-top:6px">${editorState.voiceGen?'已生成 '+editorState.voiceLines.length+' 段配音，混音按上方占比合成':'点击左侧生成按钮，AI 将基于解说文案逐段配音'}</div>
+        <div class="sec-title" style="margin-top:14px">字幕（可逐段编辑 · 由配音时间戳自动生成）</div>
+        <div style="max-height:240px;overflow:auto">${
+          editorState.voiceGen
+            ? editorState.voiceLines.map((s,i)=>`<div class="sub-row" style="align-items:flex-start">
+                <span class="st" style="padding-top:8px">${s.t}</span>
+                <textarea class="vedit" data-i="${i}" oninput="editVoiceLine(${i},this.value)" style="flex:1;min-height:38px;padding:7px 8px;border:1px solid var(--line);border-radius:7px;font-size:12.5px;font-family:inherit;resize:vertical">${s.x.replace(/</g,'&lt;')}</textarea>
+                <button class="btn sm ghost" style="margin-left:8px;margin-top:4px;font-size:11px;padding:2px 7px">▶</button>
+              </div>`).join('')
+            : `<div class="muted" style="font-size:12px;padding:6px 0">尚未生成。配音完成后，字幕会按时间戳自动列出，可逐段修改。</div>`
+        }</div>
+      </div>
+    </div>
+    <div style="margin-top:14px"><button class="btn" ${editorState.voiceGen?'':'disabled'} onclick="goEditorSub('cut')">下一步：自动切点 →</button></div>`;
+  } else if(editorSub==='align'){
+    eb.innerHTML=`<div class="edit-grid">
+      <div class="card" style="padding:14px">
+        <div class="sec-title">① 导入素材</div>
+        <div class="video-stub">▶ ${editorState.videoName}</div>
+        <div class="muted" style="font-size:11.5px;margin-top:8px">时长 02:18 · 1080p · 已抽音轨</div>
+        <button class="btn sm" style="margin-top:10px" ${editorState.imported?'disabled':''} onclick="doImport()">📥 导入并对齐文案</button>
+      </div>
+      <div class="card" style="padding:14px">
+        <div class="sec-title">配套文案</div>
+        <textarea class="field" style="width:100%;min-height:160px;padding:10px;border:1px solid var(--line);border-radius:8px;font-size:12.5px;background:var(--bg);font-family:inherit;resize:vertical" id="scriptInput">${editorState.script}</textarea>
+        <div class="muted" style="font-size:11.5px">按段落切分；与视频音轨 ASR 时间戳对齐 → 定位每段对应片段。</div>
+      </div>
+    </div>
+    ${editorState.aligned?`<div class="card" style="padding:14px;margin-top:14px">
+      <div class="sec-title">对齐结果</div>
+      <div class="align-progress"><i style="width:${editorState.alignedPct}%"></i></div>
+      <div class="muted" style="font-size:12px">${editorState.alignedPct}% · 4 段文案已映射到视频时间码</div>
+      <button class="btn" style="margin-top:12px" onclick="goEditorSub('voice')">下一步：解说配音 →</button>
+    </div>`:''}`;
+  } else if(editorSub==='cut'){
+    eb.innerHTML=`<div class="card" style="padding:14px">
+      <div class="sec-title">② 自动切点（基于文案智能剪辑）</div>
+      <div class="muted" style="font-size:12px;margin-bottom:10px">AI 在视频中定位每段文案对应片段，删除静音/废片/不相关片段。</div>
+      <button class="btn sm" onclick="doSmartCut()" ${editorState.cuts?'disabled':''}>⚡ 生成粗剪时间线</button>
+    </div>
+    ${editorState.cuts?`<div style="margin-top:12px">
+      ${editorState.cuts.map((c,i)=>`<div class="seg-card ${c.kept?'':'dropped'}">
+        <span class="ti">${c.t1} → ${c.t2}</span>
+        <span class="tx">${c.tx}</span>
+        <span class="dr">${c.dur}s</span>
+        <span class="kept" onclick="toggleCut(${i})" style="cursor:pointer">
+          <input type="checkbox" ${c.kept?'checked':''} onclick="event.stopPropagation();toggleCut(${i})">
+          ${c.kept?'保留':'丢弃'}
+        </span>
+      </div>`).join('')}
+    </div>
+    <div style="margin-top:14px"><button class="btn" onclick="doBuildTimeline()">下一步：进入时间线精修 →</button></div>`:''}`;
+  } else if(editorSub==='time'){
+    if(!editorState.clips){editorState.clips=buildDefaultClips();}
+    const clips=editorState.clips;
+    const trackMap={video:clips.video,audio:clips.audio,sub:clips.sub,gen:clips.gen};
+    eb.innerHTML=`<div class="card" style="padding:14px">
+      <div class="sec-title">③ 时间线多轨精修</div>
+      <div class="muted" style="font-size:12px;margin-bottom:12px">点击片段可在右侧查看/编辑属性；可拖拽调位（本原型为示意）。</div>
+      ${['video','audio','sub','gen'].map(k=>`
+        <div class="track-row">
+          <span class="lab">${({video:'视频轨',audio:'音频轨',sub:'字幕轨',gen:'生成轨'})[k]}</span>
+          <div class="track ${k}">${trackMap[k].map((b,i)=>`<div class="block ${selectedClip===k+'-'+i?'selected':''}" onclick="selClip('${k}',${i})" style="width:${Math.max(40,b.len*4)}px">${b.label}</div>`).join('')}</div>
+        </div>
+      `).join('')}
+    </div>
+    <div style="margin-top:12px"><button class="btn" onclick="goEditorSub('out')">下一步：字幕花字导出 →</button></div>`;
+  } else if(editorSub==='out'){
+    eb.innerHTML=`<div class="edit-grid">
+      <div class="card" style="padding:14px">
+        <div class="sec-title">④ 字幕预览（重点高亮）</div>
+        <div class="preview-box">成片预览（含字幕烧录）
+          <div class="pbar" id="exportBar"></div>
+        </div>
+        <div style="margin-top:12px;max-height:200px;overflow:auto">
+          ${['00:00.5','00:04.0','00:09.0','00:14.0'].map((t,i)=>`<div class="sub-row"><span class="st">${t}</span><span>${demoLines[i]}</span></div>`).join('')}
+        </div>
+      </div>
+      <div class="card" style="padding:14px">
+        <div class="sec-title">导出设置</div>
+        <div class="muted" style="font-size:12px;margin:8px 0 14px">字幕重点高亮将随字幕一并烧录；如需花字效果可在口播模块完成。</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <label style="display:flex;gap:6px;align-items:center;font-size:12.5px;color:var(--muted)"><input type="checkbox" checked>烧录字幕（含重点高亮）</label>
+          <label style="display:flex;gap:6px;align-items:center;font-size:12.5px;color:var(--muted)"><input type="checkbox" checked>混音配音</label>
+          <label style="display:flex;gap:6px;align-items:center;font-size:12.5px;color:var(--muted)"><input type="checkbox" checked>硬件加速</label>
+        </div>
+        <button class="btn" id="doExport" style="margin-top:14px">🚀 开始合成导出</button>
+        <button class="btn ghost" style="margin-top:8px" onclick="archiveToFilm()">📁 归档到影片库</button>
+      </div>
+    </div>`;
+    const btn=$('#doExport');
+    if(btn)btn.onclick=()=>{const bar=$('#exportBar');let p=0;setTask('合成中…',10);const iv=setInterval(()=>{p+=9;if(bar)bar.style.width=p+'%';setTask('导出 '+p+'%',p);if(p>=100){clearInterval(iv);setTask('导出完成 ✓',100);setTimeout(()=>setTask('空闲',0),1500);}},280);};
+  }
+}
+const demoLines=[
+  '走上这条老街，阳光打在青石板上。',
+  '转角有家老店，老板正在煮面，热气腾腾。',
+  '我点了一碗面，尝一口，嘴角上扬。',
+  '结尾我坐在窗边，看着行人，写一段话。',
+];
+window.goEditorSub=function(id){editorSub=id;renderStage();};
+window.genNarration=function(){
+  const btn=$('#genNarBtn');if(btn)btn.disabled=true;
+  const bar=$('#narProg');const lab=$('#narProgLabel');
+  if(bar)bar.style.display='block';if(lab)lab.style.display='block';
+  let p=0;setTask('AI 解析视频内容…',10);
+  const iv=setInterval(()=>{
+    p+=8;if(bar)bar.querySelector('i').style.width=p+'%';
+    if(lab)lab.textContent='分析镜头、识别场景、撰写解说 ' + p + '%';
+    setTask('生成解说文案 '+p+'%',p);
+    if(p>=100){
+      clearInterval(iv);
+      // 根据所选电影生成不同风格解说
+      const t=editingProj.t;
+      const map={
+        '城市之光':`镜头从城市夜空的霓虹切入，画面逐渐下摇。\n这是一座被灯光忽略的城市，老城区的灯永远先亮起。\n主人公走过街角，故事在拐角处发生。\n让我们一起走进《城市之光》的世界。`,
+        '归途':`开场：远山的剪影映衬在落日里，画面舒缓推进。\n一个人，一个背包，一段回家的路。\n镜头记录着沿途的风景与人情。\n这就是《归途》，一段平凡却不普通的旅程。`,
+        '暗涌':`寂静的海面之下，浪潮早已涌动。\n故事从一封匿名信开始，悬念层层展开。\n人物在关键时刻交错的镜头，构成《暗涌》的主线。\n来吧，一起揭开谜底。`,
+        '外婆的菜园':`一座小小的菜园，承载着几代人的记忆。\n镜头从清晨的第一缕光开始，外婆的身影忙碌而温柔。\n这是一部温情的纪录短片《外婆的菜园》。`,
+        '雨夜书店':`雨夜、霓虹灯、一家不打烊的书店。\n每一个进来的人都有自己的故事。\n镜头安静地观察，让故事自己浮现。\n《雨夜书店》，与你共享一个安静的夜。`,
+        '长河':`从雪山到大海，《长河》展现一幅纵跨千里的画卷。\n镜头沿河而下，记录沿岸的风土与人情。\n让我们一起，沿河而行。`,
+        '喵星日记':`这是一只小猫的视角，记录它眼中的世界。\n阳光、纸箱、一根逗猫棒，都是一天的全部。\n《喵星日记》，轻松治愈的小动画。`,
+        '齿轮王国':`叮叮当当，是齿轮转动的声响。\n在这个由齿轮构成的小王国里，每一颗齿轮都不可或缺。\n《齿轮王国》，让孩子爱上机械之美。`,
+        '云朵工厂':`天上的云朵是怎么来的？\n在《云朵工厂》里，有一群忙碌的小家伙负责生产云朵。\n童趣的画风，温暖的配乐，是睡前故事的好选择。`,
+        '小灯塔':`海边的灯塔，孤独却坚定。\n《小灯塔》用一盏灯守候每一个航行的夜晚。\n适合全家一起观看的温馨短片。`,
+        '候鸟':`每年春天，候鸟跨越山海归来。\n《候鸟》用纪实镜头追踪迁徙的足迹，记录生命的奇迹。`,
+        '匠心':`一把刀、一块铁、一双手。\n《匠心》走近默默无闻的手艺人，记录他们数十年如一日的坚持。`,
+      };
+      const txt=map[t] || `镜头从影片的第一个画面开始，AI 正在为你撰写一份解说稿。\n这里会生成贴合画面节奏与情绪的旁白文字，可二次编辑。\n定稿后将进入下一步：与视频音轨时间戳对齐。`;
+      editorState.narration=txt;
+      setTask('解说文案已生成',100);setTimeout(()=>setTask('空闲',0),1000);
+      renderStage();
+    }
+  },180);
+};
+window.importFilm=function(){
+  // 在当前选中类型下加入一个新工程，并自动进入剪辑台
+  const cat=filmCat;
+  const name=prompt('导入影片名称：','我的影片 '+(filmProjects[cat]?(filmProjects[cat].length+1):1));
+  if(!name) return;
+  if(!filmProjects[cat]) filmProjects[cat]=[];
+  filmProjects[cat].unshift({t:name,s:'草稿'});
+  // 增加类型计数
+  const cobj=filmCats.find(x=>x.id===cat);if(cobj)cobj.n=(filmProjects[cat]||[]).length;
+  openEditor(cat,name);
+};
+
+/* 影片剪辑台 · 解说配音 */
+function buildVoiceLines(text){
+  // 解说文案按段切分，每段生成配音时间戳
+  const paras=(text||'').split(/\n+/).map(s=>s.trim()).filter(Boolean);
+  if(!paras.length) return [];
+  const starts=[0,4.2,8.4,12.6,16.8,21.0,25.2];
+  return paras.map((p,i)=>({t:String(Math.floor(starts[i]/60))+':'+(starts[i]%60<10?'0':'')+(starts[i]%60).toFixed(1).replace(/\.0$/,'.0'),x:p,dur:Math.round(starts[i+1]-starts[i]||3.2)}));
+}
+window.editVoiceLine=function(i,v){if(editorState.voiceLines&&editorState.voiceLines[i])editorState.voiceLines[i].x=v;};
+window.setVoiceMix=function(v){editorState.voiceMix=Number(v)/100;renderAll();};
+window.previewMix=function(){const p=Math.round((editorState.voiceMix||0.15)*100);setTask('混音预览原声 '+p+'% · 解说 '+(100-p)+'%',10);setTimeout(()=>setTask('空闲',0),1400);};
+window.genVoiceForFilm=function(){
+  const btn=$('#doVoice');if(btn)btn.disabled=true;
+  const bar=$('#voiceProg');const lab=$('#voiceProgLabel');
+  if(bar)bar.style.display='block';if(lab)lab.style.display='block';
+  let p=0;setTask('AI 智能配音中…',10);
+  const iv=setInterval(()=>{
+    p+=9;if(bar)bar.querySelector('i').style.width=p+'%';
+    if(lab)lab.textContent='分段合成语音、对齐时间戳 '+p+'%';
+    setTask('智能配音 '+p+'%',p);
+    if(p>=100){
+      clearInterval(iv);
+      const ta=$('#voiceScript');const txt=ta?ta.value:(editorState.narration||editorState.script||'');
+      editorState.voiceLines=buildVoiceLines(txt);
+      editorState.voiceGen=true;
+      setTask('配音+字幕生成完成',100);
+      setTimeout(()=>setTask('空闲',0),1000);
+      renderStage();
+    }
+  },200);
+};
+window.reVoiceForFilm=function(){
+  editorState.voiceGen=false;editorState.voiceLines=[];
+  renderStage();
+  // 自动重新触发一次生成
+  setTimeout(()=>genVoiceForFilm(),120);
+};
+window.doImport=function(){editorState.imported=true;setTask('对齐文案与音轨中…',40);setTimeout(()=>{editorState.aligned=true;editorState.alignedPct=100;setTask('对齐完成',100);setTimeout(()=>setTask('空闲',0),800);renderStage();},1100);};
+window.doSmartCut=function(){setTask('自动切点中…',40);setTimeout(()=>{
+  editorState.cuts=[
+    {t1:'00:00.5',t2:'00:04.0',tx:'开场：走上这条老街，阳光打在青石板上。',dur:4,kept:true},
+    {t1:'00:04.0',t2:'00:09.0',tx:'转角有家老店，老板正在煮面，热气腾腾。',dur:5,kept:true},
+    {t1:'00:09.0',t2:'00:14.5',tx:'我点了一碗面，尝一口，嘴角上扬。',dur:5,kept:true},
+    {t1:'00:38',t2:'00:52',tx:'【废片/不相关】路人闲谈',dur:14,kept:false},
+    {t1:'00:54.0',t2:'00:60.0',tx:'结尾：坐在窗边，写一段话。',dur:6,kept:true},
+  ];
+  setTask('粗剪完成',100);setTimeout(()=>setTask('空闲',0),800);renderStage();
+},1200);};
+window.toggleCut=function(i){const c=editorState.cuts[i];c.kept=!c.kept;renderStage();};
+window.doBuildTimeline=function(){editorSub='time';renderStage();};
+function buildDefaultClips(){
+  return {
+    video:[{label:'开场',len:8},{label:'老店',len:10},{label:'吃面',len:14},{label:'结尾',len:10}],
+    audio:[{label:'BGM 1',len:18},{label:'BGM 2',len:14}],
+    sub:[{label:'开场字幕',len:8},{label:'老店字幕',len:10},{label:'吃面字幕',len:14},{label:'结尾字幕',len:10}],
+    gen:[{label:'生成片段1',len:8},{label:'生成片段2',len:10},{label:'生成片段3',len:14}],
+  };
+}
+window.selClip=function(k,i){selectedClip=k+'-'+i;renderStage();};
+window.pickFlower=function(id){editorState.flower=id;renderStage();};
+window.archiveToFilm=function(){setTask('已归档到影片库',100);setTimeout(()=>setTask('空闲',0),1200);};
+
+/* ===== 口播 ===== */
+function renderSpoken(acts,sub){
+  const v=spokenVideos.find(x=>x.id===spokenSel);
+  const baseDesc='上传 → 识别音频 → 提取文案；保留纠正（气口/口误/重复 采纳/忽略）与字幕重点/花字烧录';
+  $('#stageTitle').textContent='口播提取 · '+ (v?v.name:'') ;
+  $('#stageDesc').textContent=baseDesc;
+  acts.innerHTML=`<button class="btn sm" onclick="uploadSpoken()">+ 上传视频</button>`;
+  sub.innerHTML=spokenSteps.map(s=>`<div class="ss ${s.id===spokenStage?'active':(spokenSteps.findIndex(x=>x.id===spokenStage)>spokenSteps.findIndex(x=>x.id===s.id)?'done':'')}" onclick="goSpokenStage('${s.id}')">${s.name}</div>`).join('');
+  const body=$('#stageBody');
+  if(!v){body.innerHTML=`<div class="drop"><div class="big">🎙</div>拖入或点击「上传视频」<br><span class="muted" style="font-size:12px">支持 mp4 / mov / m4a</span></div>
+    <div class="muted" style="margin-top:14px;font-size:12px">已上传 ${spokenVideos.length} 个视频，点击左侧查看。</div>`;
+    spokenStage='upload';return;}
+  if(spokenStage==='upload'){
+    const assetsHtml=(v.assets&&v.assets.length)
+      ? v.assets.map(a=>`<div class="asset-chip"><span class="at ${a.type}">${assetTypeLabel(a.type)}</span>${a.name}<span class="ax" onclick="delAsset('${v.id}','${a.name.replace(/'/g,"\\'")}')">✕</span></div>`).join('')
+      : '<span class="muted" style="font-size:12px">尚未上传素材</span>';
+    body.innerHTML=`<div class="drop"><div class="big">🎙</div>当前视频：${v.name}<br><span class="muted" style="font-size:12px">${v.dur} · 已识别 ${v.tr.length} 句</span><br>
+      <button class="btn sm" style="margin-top:12px" onclick="goSpokenStage('tr')">下一步：识别 →</button></div>
+      <div class="card" style="padding:14px;margin-top:14px">
+        <div class="sec-title">素材库（可选）</div>
+        <div class="muted" style="font-size:12px;margin-bottom:8px">上传图片 / BGM / 音效 / 视频片段，供后续「④匹配素材」步骤智能匹配使用。</div>
+        <div class="asset-list">${assetsHtml}</div>
+        <button class="btn sm ghost" style="margin-top:8px" onclick="uploadAsset('${v.id}')">+ 上传素材</button>
+      </div>`;
+  } else if(spokenStage==='tr'){
+    body.innerHTML=`
+     <div class="kpis">
+       <div class="kpi"><div class="v">${v.dur}</div><div class="l">时长</div></div>
+       <div class="kpi"><div class="v">${v.tr.length}</div><div class="l">转写句</div></div>
+       <div class="kpi"><div class="v">${v.script?'✓':'—'}</div><div class="l">文案提取</div></div>
+     </div>
+     <div class="card" style="padding:12px;margin-bottom:14px">
+       <div class="wave">${Array.from({length:48}).map((_,i)=>`<i style="height:${20+Math.abs(Math.sin(i*0.7))*70}%"></i>`).join('')}</div>
+       <div style="margin-top:10px;display:flex;gap:8px">
+         <button class="btn sm" onclick="transcribe('${v.id}')">▶ 识别音频提取文案</button>
+         <button class="btn sm ghost" onclick="goSpokenStage('fix')" ${v.script?'':'disabled'}>下一步：纠正 →</button>
+       </div>
+     </div>
+     <div class="card" style="padding:8px 14px">
+       <div class="sec-title" style="padding:8px 0 4px">音频识别结果（ASR）</div>
+       ${v.tr.map(r=>`<div class="tr-line"><span class="t">${r.t}</span><span class="x">${r.x.replace(/那个|呃/g,m=>({那个:'<span class="hl">那个</span>',呃:'<span class="hl">呃</span>'}[m]))}</span></div>`).join('')}
+     </div>
+     ${v.script?`<div class="card" style="padding:14px;margin-top:14px"><div class="sec-title">提取文案</div><div class="script-box">${v.script}</div></div>`:''}`;
+  } else if(spokenStage==='fix'){
+    renderSpokenFix(body,v);
+  } else if(spokenStage==='match'){
+    renderSpokenMatch(body,v);
+  } else if(spokenStage==='flw'){
+    renderSpokenFlower(body,v);
+  }
+}
+function renderSpokenFix(body,v){
+  const c={gap:0,mistake:0,repeat:0,acc:0};
+  v.issues.forEach(i=>{c[i.type]++;if(i.accepted)c.acc++;});
+  body.innerHTML=`
+   <div class="muted" style="font-size:12px;margin-bottom:10px">检测建议默认"采纳/忽略"双选，标记可回溯，<b>不自动破坏原片</b>。</div>
+   <div class="iss-stat">
+     <div class="stat gap"><div class="v">${c.gap}</div><div class="l">气口</div></div>
+     <div class="stat mis"><div class="v">${c.mistake}</div><div class="l">口误/卡顿</div></div>
+     <div class="stat rep"><div class="v">${c.repeat}</div><div class="l">重复/啰嗦</div></div>
+     <div class="stat acc"><div class="v">${c.acc}</div><div class="l">已采纳</div></div>
+   </div>
+   <div style="display:flex;gap:8px;margin-bottom:12px">
+     <button class="btn sm ok" onclick="acceptAllIssues()">✓ 全部采纳</button>
+     <button class="btn sm ghost" onclick="ignoreAllIssues()">⊘ 全部忽略</button>
+     <button class="btn sm ghost" onclick="cleanFromAccepted()">🧹 生成干净文案</button>
+     <button class="btn sm ghost" onclick="goSpokenStage('match')">下一步：匹配素材 →</button>
+   </div>
+   ${v.issues.map(i=>`
+     <div class="iss-row ${i.accepted==null?'':i.accepted?'accepted':'ignored'}">
+       <span class="tag ${({gap:'gap',mistake:'mis',repeat:'rep'})[i.type]}">${{gap:'气口',mistake:'口误',repeat:'重复'}[i.type]}</span>
+       <span class="ti">${i.ti}</span>
+       <span class="tx">${i.tx?`<del>${i.tx}</del> → <ins>${i.suggestion.replace(/^删除|^合并|^保留|，.*$/,'')}</ins>`:'<span class="muted">'+i.suggestion+'</span>'}</span>
+       <span class="acts">
+         <button class="btn sm ok" onclick="setIssue('${v.id}','${i.id}',true)">采纳</button>
+         <button class="btn sm ghost" onclick="setIssue('${v.id}','${i.id}',false)">忽略</button>
+       </span>
+     </div>
+   `).join('')}
+   ${v.cleanScript?`<div class="card" style="padding:14px;margin-top:14px"><div class="sec-title">干净文案预览</div><div class="script-box">${v.cleanScript}</div></div>`:''}
+  `;
+}
+function renderSpokenFlower(body,v){
+  const flw=document.querySelector('.flow-card.active')?editorState.flower:editorState.flower;
+  body.innerHTML=`
+   <div class="muted" style="font-size:12px;margin-bottom:10px">自动抽取的关键词在字幕中加花字高亮；可切换花字模板，点「烧录」写入视频。</div>
+   <div class="edit-grid">
+     <div class="card" style="padding:14px">
+       <div class="sec-title">字幕重点 + 花字预览</div>
+       <div style="max-height:300px;overflow:auto">
+         ${v.tr.map(r=>{
+           const kws=v.keywords||[];
+           // 简单高亮：在文案中匹配关键词并按选中模板渲染
+           let html=r.x;
+           kws.forEach(k=>{
+             const safe=k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+             html=html.replace(new RegExp(safe,'g'),m=>`<span class="kw">${m}</span>`);
+           });
+           // 第一个句子的第一个关键词改成花字
+           const tpl=flowerTpls.find(t=>t.id===editorState.flower);
+           if(tpl){
+             const safe=kws[0]?kws[0].replace(/[.*+?^${}()|[\]\\]/g,'\\$&'):null;
+             if(safe){html=html.replace(new RegExp(safe),m=>`<span class="flw ${tpl.cls}">${m}</span>`);}
+           }
+           return `<div class="tr-line"><span class="t">${r.t}</span><span class="x">${html}</span></div>`;
+         }).join('')}
+       </div>
+       <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+         <button class="btn sm" onclick="burnFlower()">🔥 烧录到视频</button>
+         <button class="btn sm ghost" onclick="exportSpoken()">⬇ 导出干净口播片段</button>
+         <button class="btn sm ghost" onclick="exportSpokenJianYing()">🎬 导出剪映工程</button>
+       </div>
+       <div class="muted" style="font-size:11px;margin-top:6px">导出为剪映草稿（draft_content.json：视频轨 + 字幕/花字轨），导入剪映后可继续精修。</div>
+     </div>
+     <div class="card" style="padding:14px">
+       <div class="sec-title">花字模板</div>
+       <div class="flow-grid">
+         ${flowerTpls.map(t=>`<div class="flow-card ${editorState.flower===t.id?'active':''}" onclick="pickSpokenFlower('${t.id}')">
+           <div class="pt">${t.name}</div>
+           <div><span class="pp ${t.cls}">${t.demo}</span></div>
+           <div class="ds">${t.desc}</div>
+         </div>`).join('')}
+       </div>
+     </div>
+   </div>`;
+}
+function renderSpokenMatch(body,v){
+  const matched=v.matchResults;
+  const rowsHtml=matched
+    ? matched.map(m=>`<div class="m-row">
+        <span class="m-seg">${m.seg}</span>
+        <span class="m-text">${m.text}${m.text.length>=12?'…':''}</span>
+        <span class="m-kw">${m.kw?('🔑 '+m.kw):''}</span>
+        <span class="m-asset">${m.asset}</span>
+        <span class="acts"><button class="btn sm ${m.applied?'ok':''}" onclick="toggleMatch('${v.id}','${m.seg}')">${m.applied?'✓ 已应用':'应用'}</button></span>
+      </div>`).join('')
+    : `<div class="muted" style="font-size:12px;padding:6px 0">尚未匹配。点击「🤖 智能匹配素材」，系统会根据口播文案与关键词，从素材库推荐合适的 BGM / 音效 / 配图 / 片段。</div>`;
+  body.innerHTML=`
+   <div class="muted" style="font-size:12px;margin-bottom:10px">根据口播文案与关键词，从素材库智能匹配最合适的素材，并应用到对应片段。</div>
+   <div style="display:flex;gap:8px;margin-bottom:12px">
+     <button class="btn sm" onclick="doMatch('${v.id}')">🤖 智能匹配素材</button>
+     <button class="btn sm ghost" ${matched?'':'disabled'} onclick="applyAllMatch('${v.id}')">✓ 全部应用</button>
+     <button class="btn sm ghost" onclick="goSpokenStage('flw')">下一步：花字字幕 →</button>
+   </div>
+   <div class="card" style="padding:14px">
+     <div class="sec-title">素材库（${v.assets?v.assets.length:0} 项）</div>
+     <div class="asset-list">${(v.assets&&v.assets.length)?v.assets.map(a=>`<div class="asset-chip"><span class="at ${a.type}">${assetTypeLabel(a.type)}</span>${a.name}</div>`).join(''):'<span class="muted" style="font-size:12px">无素材，可在①上传步骤添加</span>'}</div>
+   </div>
+   <div class="card" style="padding:14px;margin-top:14px">
+     <div class="sec-title">匹配结果${matched?'（'+matched.filter(m=>m.applied).length+'/'+matched.length+' 已应用）':''}</div>
+     ${rowsHtml}
+   </div>`;
+}
+window.goSpokenStage=function(id){spokenStage=id;renderStage();};
+window.uploadSpoken=function(){const n='口播视频'+spokenVideos.length+'.mp4';spokenVideos.unshift({id:'v'+Date.now(),name:n,dur:'0'+(1+Math.floor(Math.random()*3))+':'+String(Math.floor(Math.random()*60)).padStart(2,'0'),tr:[],script:null,keywords:[],assets:[],matchResults:null,issues:[]});spokenSel=spokenVideos[0].id;renderAll();};
+window.transcribe=function(id){const v=spokenVideos.find(x=>x.id===id);setTask('识别音频中…',50);setTimeout(()=>{v.script=v.tr.map(r=>r.x.replace(/那个|呃/g,'')).join('');setTask('文案提取完成',100);setTimeout(()=>setTask('空闲',0),1200);renderAll();},1300);};
+window.copyToCreation=function(){cState.reqFromSpoken='（来自口播文案）';module='creation';cStage='req';renderAll();};
+window.assetTypeLabel=function(t){return {image:'🖼 图片',bgm:'🎵 BGM',sfx:'🔊 音效',clip:'🎬 片段'}[t]||'文件';};
+window.uploadAsset=function(id){const v=spokenVideos.find(x=>x.id===id);const name=prompt('素材名称（留空随机）：');if(name===null)return;const types=['image','bgm','sfx','clip'];const t=types[(v.assets?v.assets.length:0)%4];if(!v.assets)v.assets=[];v.assets.push({name:name||('素材'+(v.assets.length+1)+'.'+t),type:t});renderAll();};
+window.delAsset=function(id,name){const v=spokenVideos.find(x=>x.id===id);v.assets=v.assets.filter(a=>a.name!==name);renderAll();};
+window.doMatch=function(id){const v=spokenVideos.find(x=>x.id===id);setTask('智能匹配素材中…',40);setTimeout(()=>{
+  const segs=v.tr.filter(r=>r.x.length>6);
+  v.matchResults=segs.slice(0,4).map((r,i)=>{
+    const a=(v.assets&&v.assets[i])||null;
+    const kw=(v.keywords&&v.keywords[i])||null;
+    return {seg:r.t,text:r.x.slice(0,12),asset:a?a.name:'(暂无匹配素材)',kw:kw||'',applied:!!a};
+  });
+  setTask('匹配完成',100);setTimeout(()=>setTask('空闲',0),1200);renderAll();
+},1200);};
+window.toggleMatch=function(id,seg){const v=spokenVideos.find(x=>x.id===id);const m=v.matchResults&&v.matchResults.find(x=>x.seg===seg);if(m)m.applied=!m.applied;renderStage();};
+window.applyAllMatch=function(id){const v=spokenVideos.find(x=>x.id===id);if(v.matchResults)v.matchResults.forEach(m=>m.applied=true);renderStage();};
+window.setIssue=function(vid,iid,val){const v=spokenVideos.find(x=>x.id===vid);const it=v.issues.find(x=>x.id===iid);it.accepted=val;renderStage();};
+window.acceptAllIssues=function(){const v=spokenVideos.find(x=>x.id===spokenSel);v.issues.forEach(i=>i.accepted=true);renderStage();};
+window.ignoreAllIssues=function(){const v=spokenVideos.find(x=>x.id===spokenSel);v.issues.forEach(i=>i.accepted=false);renderStage();};
+window.cleanFromAccepted=function(){const v=spokenVideos.find(x=>x.id===spokenSel);const acc=new Set(v.issues.filter(i=>i.accepted).map(i=>i.id));v.cleanScript=`大家好，今天给大家介绍我们的新产品 VideosFlow。\n它是一款基于 AI 的智能视频剪辑工具。\n可以自动根据文案剪辑视频。\n还能修掉口播里的气口和口误，提升观感。\n大家记得点赞关注哦。`;setTask('干净文案已生成',100);setTimeout(()=>setTask('空闲',0),1000);renderStage();};
+window.pickSpokenFlower=function(id){editorState.flower=id;renderStage();};
+window.burnFlower=function(){setTask('烧录花字到视频中…',40);setTimeout(()=>{setTask('已烧录 ✓',100);setTimeout(()=>setTask('空闲',0),1200);},1300);};
+window.exportSpoken=function(){setTask('导出干净口播片段…',50);setTimeout(()=>{setTask('导出完成 ✓',100);setTimeout(()=>setTask('空闲',0),1200);},1100);};
+window.exportSpokenJianYing=function(){
+  const v=spokenVideos.find(x=>x.id===spokenSel);
+  if(!v){setTask('请先选择一个口播视频',0);return;}
+  setTask('生成剪映工程文件…',40);
+  setTimeout(()=>{
+    const fps=30;
+    const tpl=flowerTpls.find(t=>t.id===editorState.flower)||flowerTpls[0];
+    const toSec=s=>{const p=String(s).split(':');return p.length===2?(+p[0]*60)+(+p[1]):(+p[0]);};
+    const total=v.dur?toSec(v.dur):v.tr.reduce((m,r)=>Math.max(m,toSec(r.t)),0);
+    const colorMap={emphasis:'#f59e0b',emotion:'#a855f7',shout:'#ef4444',keyword:'#e5e7eb',underline:'#3b82f6',shake:'#ef4444'};
+    const texts=v.tr.map((r,i)=>{
+      const start=toSec(r.t);
+      const end=v.tr[i+1]?toSec(v.tr[i+1].t):total;
+      const kw=(v.keywords||[]).find(k=>r.x.includes(k));
+      return {id:'text_'+i,content:r.x,start:+start.toFixed(3),end:+end.toFixed(3),
+        flower:!!kw,template:tpl.name,color:kw?colorMap[tpl.cls]:'#ffffff'};
+    });
+    const draft={
+      app_version:'5.x',fps:fps,canvas:{w:1920,h:1080},duration:+total.toFixed(3),
+      materials:{
+        videos:[{id:'vid_0',file_name:v.name,type:'video',duration:+total.toFixed(3)}],
+        texts:texts
+      },
+      tracks:[
+        {type:'video',segments:[{material_id:'vid_0',source:'local',start:0,end:+total.toFixed(3)}]},
+        {type:'text',segments:texts.map((t,i)=>({material_id:'text_'+i,start:t.start,end:t.end}))}
+      ]
+    };
+    const blob=new Blob([JSON.stringify(draft,null,2)],{type:'application/json'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='draft_content.json';a.click();
+    setTask('剪映工程已导出（draft_content.json）✓',100);
+    setTimeout(()=>setTask('空闲',0),1600);
+  },1300);
+};
+
+/* ===== 创作视频 ===== */
+function renderCreation(acts,sub){
+  $('#stageTitle').textContent='创作视频 · '+cSteps.find(s=>s.id===cStage).name;
+  $('#stageDesc').textContent='从大体需求自动生成完整视频（七步）';
+  sub.innerHTML=cSteps.map(s=>{const st=s.id===cStage?'active':(cSteps.findIndex(x=>x.id===cStage)>cSteps.findIndex(x=>x.id===s.id)?'done':'');return `<div class="ss ${st}" data-s="${s.id}">${s.name}</div>`;}).join('');
+  sub.querySelectorAll('.ss').forEach(el=>el.onclick=()=>{cStage=el.dataset.s;renderAll();});
+  acts.innerHTML='';
+  const body=$('#stageBody');
+  if(cStage==='req'){
+    body.innerHTML=`<div class="card" style="padding:16px;max-width:760px">
+      <div class="sec-title">大体需求${cState.reqFromSpoken?'（已带入口播文案）':''}</div>
+      <div class="field"><label>主题 / 一句话需求</label><textarea id="brief" rows="4" placeholder="例如：做一个 60 秒的科普短视频，介绍 AI 视频剪辑，风格轻松活泼，面向新手">${cState.reqFromSpoken||'做一个 60 秒的科普短视频，介绍 AI 视频剪辑，风格轻松活泼，面向新手。'}</textarea></div>
+      <div class="grid" style="grid-template-columns:1fr 1fr">
+        <div class="field"><label>风格</label><select><option>轻松活泼</option><option>专业沉稳</option><option>温情叙事</option><option>炫酷科技</option></select></div>
+        <div class="field"><label>时长</label><select><option>30 秒</option><option>60 秒</option><option>2 分钟</option><option>5 分钟</option></select></div>
+        <div class="field"><label>受众</label><select><option>新手</option><option>从业者</option><option>大众</option></select></div>
+        <div class="field"><label>平台</label><select><option>抖音</option><option>视频号</option><option>B站</option><option>YouTube</option></select></div>
+      </div>
+      <button class="btn" onclick="genScript()">✨ 自动写文案</button>
+    </div>`;
+  } else if(cStage==='script'){
+    if(!cState.script){body.innerHTML=`<div class="empty-hint">请先完成「需求」步骤生成文案。</div>`;return;}
+    body.innerHTML=`<div class="sec-title">自动写文案（初稿）</div><div class="script-box">${cState.script}</div>
+      <div style="margin-top:12px"><button class="btn" onclick="goHuman()">下一步：去 AI 味 →</button></div>`;
+  } else if(cStage==='human'){
+    if(!cState.script){body.innerHTML=`<div class="empty-hint">请先生成文案。</div>`;return;}
+    const pt=settingsState.prompts;
+    const selTpl=cState.humanPrompt||'humanize';
+    body.innerHTML=`<div class="grid" style="grid-template-columns:1fr 1fr">
+      <div><div class="sec-title">去 AI 味前</div><div class="script-box" style="color:var(--muted)">${cState.script}</div></div>
+      <div><div class="sec-title">去 AI 味后（口语化）</div>
+        <div class="script-box">${cState.human||'<span class="muted">点击「去 AI 味」生成</span>'}</div>
+        <div class="field" style="margin-top:10px"><label>提示词模板</label>
+          <select onchange="pickHumanPrompt(this.value)">${Object.keys(pt).map(k=>`<option value="${k}" ${k===selTpl?'selected':''}>${pt[k].name}</option>`).join('')}</select>
+        </div>
+        <div class="muted" style="font-size:11px;margin:4px 0 8px">去 AI 味将使用「${pt[selTpl].name}」模板对文案做口语化改写。</div>
+        <button class="btn sm" onclick="doHuman()">🪄 去 AI 味</button></div>
+    </div>
+    <div style="margin-top:12px"><button class="btn" ${cState.human?'':'disabled'} onclick="goStory()">下一步：生成分镜 →</button></div>`;
+  } else if(cStage==='story'){
+    const sr=cState.styleRef||'现实';
+    const sp=stylePresets[sr]||stylePresets['现实'];
+    let html=`<div class="style-ref">
+      <div class="ri">风格</div>
+      <div style="flex:1">
+        <div style="font-weight:700;margin-bottom:7px">风格约束卡（保证一致性 · 所有镜头共享）</div>
+        <div class="style-chips">${Object.keys(stylePresets).map(k=>`<button class="schip ${k===sr?'on':''}" onclick="pickStyleRef('${k}')">${k}</button>`).join('')}</div>
+        <div class="muted" style="font-size:12px;margin-top:8px">当前：<b>${sr}</b> · 色调 ${sp.tone} · 字体 ${sp.font} · 运镜 ${sp.cam}</div>
+      </div>
+    </div>`;
+    if(!cState.story.length){
+      html+=`<div class="empty-hint">还没生成分镜。<br><button class="btn" style="margin-top:12px" onclick="genStory()">✨ 生成分镜文案</button></div>`;
+    } else {
+      html+=`<div class="sec-title">分镜文案（${cState.story.length} 镜 · 可直接修改）</div>
+      ${cState.story.map((s,i)=>`<div class="shot"><div class="body">
+        <div class="idx"><span class="tag spoken">镜头 ${i+1}</span>
+          <input class="mini" value="${s.cam}" oninput="editStory(${i},'cam',this.value)" style="width:90px" placeholder="运镜"></div>
+        <div class="ed-row"><label>画面</label><textarea class="ed" rows="2" oninput="editStory(${i},'desc',this.value)">${s.desc}</textarea></div>
+        <div class="ed-row"><label>台词</label><textarea class="ed" rows="2" oninput="editStory(${i},'dialogue',this.value)">${s.dialogue}</textarea></div>
+        <div class="meta"><span>⏱ <input class="mini" value="${s.dur}" oninput="editStory(${i},'dur',this.value)" style="width:46px">秒</span></div>
+      </div></div>`).join('')}
+      <button class="btn" onclick="goImage()">下一步：生成图片 →</button>`;
+    }
+    body.innerHTML=html;
+  } else if(cStage==='image'){
+    if(!cState.story.length){body.innerHTML=`<div class="empty-hint">请先生成分镜。</div>`;return;}
+    body.innerHTML=`<div class="gen-grid" id="imgGrid">${cState.story.map((s,i)=>{
+      const refs=cState.refs[i]||[];
+      const curCat=cState.refCat[i]||'IP形象';
+      const grouped=refCats.filter(c=>refs.some(r=>r.cat===c)).map(c=>({c,items:refs.map((r,ri)=>({r,ri})).filter(o=>o.r.cat===c)}));
+      return `<div class="frame-card"><div class="fr ${cState.imgs[i]?'':'empty'}" id="img${i}">${cState.imgs[i]?'✓ 已生成':'点击生成'}</div>
+        <div class="fb"><span class="muted" style="font-size:11px">镜头 ${i+1}</span>
+        <select class="mini" onchange="setRefCat(${i},this.value)">${refCats.map(c=>`<option ${c===curCat?'selected':''}>${c}</option>`).join('')}</select>
+        <button class="btn sm" onclick="genImg(${i})">⚡ 生成图片</button>
+        <button class="btn sm ghost" onclick="addRef(${i})">🖼 加参考图 ${refs.length?('('+refs.length+')'):''}</button></div>
+        <div class="ref-thumbs">${grouped.length?grouped.map(g=>`<div class="ref-group"><div class="ref-g-label">${g.c} · ${g.items.length}</div><div class="ref-row">${g.items.map(o=>`<div class="ref-thumb"><img src="${o.r.dataUrl}" alt="${o.r.name}"><select class="rcat" onchange="setRefCatItem(${i},${o.ri},this.value)">${refCats.map(c=>`<option ${c===o.r.cat?'selected':''}>${c}</option>`).join('')}</select><button class="x" onclick="delRef(${i},${o.ri})">×</button></div>`).join('')}</div></div>`).join(''):'<span class="muted" style="font-size:11px;padding:2px 0">暂无参考图，选分类后点「加参考图」上传</span>'}</div>`;
+    }).join('')}</div>
+    <div style="margin-top:14px"><button class="btn" onclick="goFrames()">下一步：首尾帧视频 →</button></div>`;
+  } else if(cStage==='frames'){
+    if(!cState.story.length){body.innerHTML=`<div class="empty-hint">请先生成图片。</div>`;return;}
+    body.innerHTML=`<div class="gen-grid" id="frGrid">${cState.story.map((s,i)=>`
+      <div class="frame-card"><div class="fr empty" id="fr${i}">首 ░ 尾</div>
+        <div class="fb"><span class="muted" style="font-size:11px">镜头 ${i+1} · ${s.dur}s</span>
+        <button class="btn sm" onclick="genFrames(${i})">🎬 生成视频</button></div></div>`).join('')}</div>
+    <div style="margin-top:14px"><button class="btn" onclick="goVoice()">下一步：配音+字幕 →</button></div>`;
+  } else if(cStage==='voice'){
+    if(!cState.story.length){body.innerHTML=`<div class="empty-hint">请先生成分镜。</div>`;return;}
+    const allVoices=['知性女声','沉稳男声','活泼童声','方言·长沙','科技男声','温柔姐姐'];
+    const selV=cState.voices.map(v=>v.name);
+    body.innerHTML=`<div class="card" style="padding:16px;max-width:760px">
+      <div class="sec-title">配音（TTS · 可多选，每个声音配一个 IP 形象）</div>
+      <div class="voice-list">${allVoices.map(n=>{
+        const on=selV.includes(n);
+        const v=cState.voices.find(x=>x.name===n);
+        return `<div class="voice-item ${on?'on':''}">
+          <label class="vc"><input type="checkbox" ${on?'checked':''} onchange="toggleVoice('${n}')"> <b>${n}</b></label>
+          ${on?`<span class="ip-in">IP形象 <input class="mini" value="${v?(''+v.ip):n}" oninput="setVoiceIP('${n}',this.value)" style="width:120px"></span>`:''}
+        </div>`;
+      }).join('')}</div>
+      <div class="field" style="margin-top:10px"><label>语速</label><select onchange="updOther('voiceSpeed',this.value)"><option>正常</option><option>稍快</option><option>稍慢</option></select></div>
+      <button class="btn sm" onclick="genVoice()">🔊 生成配音（${cState.voices.length} 声音）</button>
+      <div class="wave" style="margin-top:12px;height:54px">${Array.from({length:60}).map((_,i)=>`<i style="height:${cState.voice.ok?20+Math.abs(Math.sin(i*0.9))*70:8}%"></i>`).join('')}</div>
+      ${cState.voices.length?`<div class="muted" style="font-size:11px;margin-top:8px">已选声音与 IP：${cState.voices.map(v=>v.name+'→'+v.ip).join('； ')}</div>`:''}
+    </div>
+    <div class="card" style="padding:8px 0;margin-top:14px;max-width:760px">
+      <div class="sec-title" style="padding:8px 14px 4px">字幕（由文案对齐生成）</div>
+      ${(cState.subs.length?cState.subs:defaultSubs()).map(s=>`<div class="sub-row"><span class="st">${s.t}</span><span>${s.x}</span></div>`).join('')}
+    </div>
+    <div style="margin-top:14px"><button class="btn" onclick="goExport()">下一步：合成导出 →</button></div>`;
+  } else if(cStage==='export'){
+    body.innerHTML=`<div class="card" style="padding:16px;max-width:760px">
+      <div class="sec-title">合成与导出</div>
+      <div class="grid" style="grid-template-columns:1fr 1fr">
+        <div class="field"><label>分辨率</label><select><option>1920×1080</option><option>1280×720</option><option>3840×2160</option></select></div>
+        <div class="field"><label>封装</label><select><option>MP4 (H.264)</option><option>MOV</option></select></div>
+      </div>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;color:var(--muted)"><input type="checkbox" checked> 混音配音</label>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;color:var(--muted);margin-top:6px"><input type="checkbox" checked> 烧录字幕</label>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="btn" id="doExport">🚀 开始合成导出</button>
+        <button class="btn ghost" onclick="exportCreationJianYing()">🎬 导出剪映工程</button>
+      </div>
+    </div>
+    <div class="preview-box" style="margin-top:14px;max-width:760px">成片预览
+      <div class="pbar" id="exportBar"></div></div>`;
+    $('#doExport').onclick=()=>{const bar=$('#exportBar');let p=0;setTask('合成中…',10);const iv=setInterval(()=>{p+=9;bar.style.width=p+'%';setTask('导出 '+p+'%',p);if(p>=100){clearInterval(iv);setTask('导出完成 ✓ 已归档影片',100);setTimeout(()=>setTask('空闲',0),1500);}},280);};
+  }
+}
+function defaultSubs(){return [{t:'0:00',x:'大家好，今天聊一个新手也能上手的事'},{t:'0:05',x:'用 AI 把文案变成视频'},{t:'0:12',x:'自动写稿、分镜、配音一条龙'}];}
+
+window.genScript=function(){
+  setTask('生成文案中…',40);
+  setTimeout(()=>{
+    cState.script=`大家好，今天聊一个新手也能上手的事——用 AI 把文案变成视频。\n\n你只需要给个大体的需求，它就能自动写稿、拆分镜、出图片，还能配音加字幕。\n\n以前剪一条视频要折腾大半天，现在把想法交给它，剩下的交给流程。\n\n如果你也想轻松做视频，不妨试试看。`;
+    cStage='script';setTask('文案已生成',100);setTimeout(()=>setTask('空闲',0),1000);renderAll();
+  },1200);
+};
+window.goHuman=function(){cStage='human';renderAll();};
+window.doHuman=function(){setTask('去 AI 味中…',50);setTimeout(()=>{
+  cState.human=`嗨，今天说个特适合新手的事儿——用 AI 把文案直接变成视频。\n\n你大概说个想法就行，它自己写稿、拆镜头、出图，连配音字幕都帮你弄好。\n\n以前剪一条视频得忙活大半天，现在你把点子丢给它，流程自动跑完。\n\n想轻松做视频的话，真的可以试一下。`;
+  setTask('已去 AI 味',100);setTimeout(()=>setTask('空闲',0),1000);renderAll();
+},1100);};
+window.goStory=function(){cStage='story';renderAll();};
+window.genStory=function(){setTask('生成分镜中…',45);setTimeout(()=>{
+  cState.story=[
+    {desc:'开场：主持人近景微笑，背景虚化，轻松氛围。',dialogue:'嗨，今天说个特适合新手的事儿——用 AI 把文案变成视频。',dur:5,cam:'近景'},
+    {desc:'界面展示：AI 剪辑按钮高亮，光标点击。',dialogue:'你大概说个想法就行，它自己写稿、拆镜头、出图。',dur:6,cam:'推近'},
+    {desc:'动画：文案自动变成时间线与图片。',dialogue:'连配音字幕都帮你弄好，一条龙。',dur:6,cam:'平摇'},
+    {desc:'结尾：主持人比赞，品牌 logo 浮现。',dialogue:'想轻松做视频的话，真的可以试一下。',dur:4,cam:'中景'},
+  ];
+  setTask('分镜已生成',100);setTimeout(()=>setTask('空闲',0),1000);renderAll();
+},1200);};
+window.goImage=function(){cStage='image';renderAll();};
+window.genImg=function(i){const el=$('#img'+i);setTask('生成图片 '+ (i+1) +'…',40);setTimeout(()=>{const pal=['linear-gradient(135deg,#6366f1,#8b5cf6)','linear-gradient(135deg,#0ea5e9,#6366f1)','linear-gradient(135deg,#8b5cf6,#ec4899)','linear-gradient(135deg,#4f46e5,#0ea5e9)'][i%4];el.className='fr';el.style.background=pal;el.textContent='✓ 已生成';cState.imgs[i]=true;setTask('图片生成完成',100);setTimeout(()=>setTask('空闲',0),1000);},1100);};
+window.goFrames=function(){cStage='frames';renderAll();};
+window.genFrames=function(i){const el=$('#fr'+i);setTask('生成首尾帧视频 '+(i+1)+'…',45);setTimeout(()=>{el.className='fr';el.style.background='linear-gradient(135deg,#6366f1,#8b5cf6)';el.textContent='▶ 首尾帧视频';cState.frames[i]=true;setTask('视频生成完成',100);setTimeout(()=>setTask('空闲',0),1000);},1300);};
+window.goVoice=function(){cStage='voice';renderAll();};
+window.genVoice=function(){cState.voice.ok=true;cState.subs=defaultSubs();setTask('配音生成完成',100);setTimeout(()=>setTask('空闲',0),1000);renderAll();};
+window.goExport=function(){cStage='export';renderAll();};
+
+/* 创作模块：去AI味模板、分镜编辑、参考图、多声音IP、剪映导出 */
+window.pickHumanPrompt=function(v){cState.humanPrompt=v;renderStage();};
+window.pickStyleRef=function(v){cState.styleRef=v;renderStage();};
+window.editStory=function(i,f,v){if(cState.story[i]){cState.story[i][f]=v;}};
+window.addRef=function(i){
+  const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;
+  inp.onchange=()=>{
+    const files=Array.from(inp.files||[]);
+    if(!cState.refs[i])cState.refs[i]=[];
+    const cat=cState.refCat[i]||'IP形象';
+    if(files.length===0){renderStage();return;}
+    let pending=files.length;
+    files.forEach(f=>{const rd=new FileReader();rd.onload=()=>{cState.refs[i].push({name:f.name,dataUrl:rd.result,cat:cat});if(--pending===0)renderStage();};rd.readAsDataURL(f);});
+  };
+  inp.click();
+};
+window.setRefCat=function(i,v){cState.refCat[i]=v;};
+window.setRefCatItem=function(i,ri,v){if(cState.refs[i]&&cState.refs[i][ri]){cState.refs[i][ri].cat=v;renderStage();}};
+window.delRef=function(i,ri){if(cState.refs[i]){cState.refs[i].splice(ri,1);renderStage();}};
+window.toggleVoice=function(n){const ex=cState.voices.find(x=>x.name===n);if(ex)cState.voices=cState.voices.filter(x=>x.name!==n);else cState.voices.push({name:n,ip:n});renderStage();};
+window.setVoiceIP=function(n,v){const o=cState.voices.find(x=>x.name===n);if(o)o.ip=v;};
+window.exportCreationJianYing=function(){
+  setTask('生成剪映工程文件…',40);
+  setTimeout(()=>{
+    const fps=30;
+    const shots=cState.story.length?cState.story:[];
+    const total=shots.reduce((m,s)=>m+(+s.dur||0),0)||30;
+    const texts=(cState.subs.length?cState.subs:defaultSubs()).map((s,i)=>({id:'text_'+i,content:s.x,start:s.t,flower:false}));
+    const voices=cState.voices.length?cState.voices:[{name:'默认',ip:'旁白'}];
+    const draft={
+      app_version:'5.x',fps:fps,canvas:{w:1920,h:1080},duration:+total.toFixed(3),
+      materials:{
+        videos:shots.map((s,i)=>({id:'shot_'+i,file_name:'镜头'+(i+1)+'.mp4',type:'video',duration:+(+s.dur||0)})),
+        texts:texts,
+        audios:voices.map((v,i)=>({id:'audio_'+i,voice:v.name,ip:v.ip}))
+      },
+      tracks:[
+        {type:'video',segments:shots.map((s,i)=>({material_id:'shot_'+i,start:0,end:+(+s.dur||0)}))},
+        {type:'text',segments:texts.map((t,i)=>({material_id:'text_'+i,start:0,end:+total}))},
+        ...voices.map((v,i)=>({type:'audio',voice:v.name,ip:v.ip,segments:[{material_id:'audio_'+i,start:0,end:+total}]}))
+      ]
+    };
+    const blob=new Blob([JSON.stringify(draft,null,2)],{type:'application/json'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='draft_content.json';a.click();
+    setTask('剪映工程已导出（draft_content.json）✓',100);
+    setTimeout(()=>setTask('空闲',0),1600);
+  },1300);
+};
+
+/* ---------------- 渲染：右面板 ---------------- */
+/* ===== 设置 ===== */
+function renderSettings(acts,sub){
+  $('#stageTitle').textContent='系统配置 · '+settingsSteps.find(x=>x.id===settingsSub).name.replace(/^[①②③]/,'');
+  $('#stageDesc').textContent='云端在线大模型 API · 提示词模板 · 其他参数';
+  acts.innerHTML=`<button class="btn sm ok" onclick="saveSettings()">💾 保存全部配置</button><button class="btn sm ghost" style="margin-left:6px" onclick="resetSettings()">↻ 恢复默认</button>`;
+  sub.innerHTML=settingsSteps.map(s=>`<div class="ss ${s.id===settingsSub?'active':(settingsSteps.findIndex(x=>x.id===settingsSub)>settingsSteps.findIndex(x=>x.id===s.id)?'done':'')}" onclick="goSettingsSub('${s.id}')">${s.name}</div>`).join('');
+  const body=$('#stageBody');
+  if(settingsSub==='api'){
+    const providerList=[
+      ['llm','文字大模型 (LLM)','写文案 / 去AI味 / 分镜 / 解说稿 / 口误检测 / 重点抽取'],
+      ['img','图片大模型','分镜图片生成 / 风格一致性参考'],
+      ['asr','语音识别 (ASR)','音频转文字 / 字幕对齐 / 剪辑对齐'],
+      ['tts','语音合成 (TTS)','影片解说配音 / 口播字幕烧录 / 创作配音'],
+      ['video','视频大模型','分镜首尾帧视频生成'],
+    ];
+    body.innerHTML=`<div class="muted" style="font-size:12.5px;margin-bottom:10px;line-height:1.6">配置 <b>Provider 可插拔</b>：为五大能力各选一个厂商，密钥存系统凭据。</div>
+      ${providerList.map(([k,n,sub])=>{
+        const p=settingsState.providers[k];
+        return `<div class="card" style="padding:14px;margin-bottom:12px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <span style="font-weight:800;font-size:13.5px">${n}</span>
+            <span class="muted" style="font-size:12px">· ${sub}</span>
+            <span style="margin-left:auto"></span>
+            <span class="tag ${p.enabled?(p.test==='ok'?'done':(p.test==='local'?'key':'ai')):''}" style="${p.enabled?'':'opacity:.5'}">${
+              !p.enabled?'未启用':p.test==='ok'?'✓ 已连接':p.test==='local'?'本地':'未测试'
+            }</span>
+            <label style="display:flex;gap:5px;align-items:center;font-size:12px;color:var(--muted)">
+              <input type="checkbox" ${p.enabled?'checked':''} onchange="toggleProvider('${k}',this.checked)">启用
+            </label>
+          </div>
+          <div class="grid" style="grid-template-columns:1fr 2fr">
+            <div class="field"><label>提供商</label><select onchange="updProvider('${k}','provider',this.value)">
+              ${providerOptions(p.provider,k).map(o=>`<option ${o===p.provider?'selected':''}>${o}</option>`).join('')}
+            </select></div>
+            <div class="field"><label>Base URL / API Endpoint</label><input value="${p.baseUrl||''}" placeholder="https://..." onchange="updProvider('${k}','baseUrl',this.value)"></div>
+            <div class="field"><label>模型 ID</label><input value="${p.model||''}" placeholder="如 gpt-4o-mini" onchange="updProvider('${k}','model',this.value)"></div>
+            <div class="field"><label>API Key <span class="muted" style="font-weight:400">(存入系统凭据)</span></label>
+              <div style="display:flex;gap:6px">
+                <input type="password" value="${p.apiKey||''}" placeholder="sk-..." onchange="updProvider('${k}','apiKey',this.value)" style="flex:1">
+                <button class="btn sm ghost" onclick="testProvider('${k}')">🔌 测试连接</button>
+              </div>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}
+      <button class="btn ghost sm">+ 添加自定义模型</button>`;
+  } else if(settingsSub==='prompt'){
+    const keys=Object.keys(settingsState.prompts);
+    const cur=settingsState.prompts[settingsState.promptEditing];
+    body.innerHTML=`<div class="edit-grid">
+      <div class="card" style="padding:14px">
+        <div class="sec-title">提示词模板</div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          ${keys.map(k=>{
+            const p=settingsState.prompts[k];
+            return `<div class="cat" style="padding:8px 10px;${settingsState.promptEditing===k?'background:var(--accent-soft);color:var(--accent-d);font-weight:700':''}" onclick="pickPrompt('${k}')">
+              <span class="nm">${p.name}</span><span class="ct" style="font-size:11px;color:var(--muted);background:var(--line2);border-radius:999px;padding:1px 8px">${k}</span>
+            </div>`;
+          }).join('')}
+          <button class="btn sm ghost" style="margin-top:6px" onclick="addPrompt()">+ 新模板</button>
+        </div>
+      </div>
+      <div class="card" style="padding:14px">
+        <div class="sec-title">${cur.name} <span class="muted" style="font-weight:400;font-size:12px">（${settingsState.promptEditing}）</span></div>
+        <div class="field"><label>模板名称</label><input value="${cur.name}" onchange="updPrompt('name',this.value)"></div>
+        <div class="field"><label>提示词正文（支持变量占位符）</label>
+          <textarea style="width:100%;min-height:200px;padding:10px;border:1px solid var(--line);border-radius:8px;font-size:12.5px;background:#fff;font-family:ui-monospace,Menlo,Consolas,monospace;resize:vertical" onchange="updPrompt('body',this.value)">${cur.body.replace(/</g,'&lt;')}</textarea>
+        </div>
+        <div class="muted" style="font-size:11.5px;margin-bottom:8px"><b>可用变量</b>：<code>${cur.placeholder}</code></div>
+        <div style="display:flex;gap:8px">
+          <button class="btn sm ok" onclick="savePrompt()">💾 保存</button>
+          <button class="btn sm ghost" onclick="resetPrompt()">↻ 恢复默认</button>
+          <button class="btn sm" style="margin-left:auto;background:var(--bad)" onclick="delPrompt()">🗑 删除</button>
+        </div>
+      </div>
+    </div>
+    <div class="muted" style="font-size:11.5px;margin-top:8px;line-height:1.6">提示词变更即时生效；变量占位符（如 <code>{{brief}}</code>）由系统在调用时替换为真实内容。</div>`;
+  } else if(settingsSub==='other'){
+    const o=settingsState.other;
+    body.innerHTML=`<div class="edit-grid">
+      <div class="card" style="padding:14px">
+        <div class="sec-title">外观与语言</div>
+        <div class="field"><label>主题</label><select onchange="updOther('theme',this.value)">
+          ${['浅色','深色','跟随系统'].map(x=>`<option ${x===o.theme?'selected':''}>${x}</option>`).join('')}
+        </select></div>
+        <div class="field"><label>语言</label><select onchange="updOther('lang',this.value)">
+          ${['简体中文','English','日本語'].map(x=>`<option ${x===o.lang?'selected':''}>${x}</option>`).join('')}
+        </select></div>
+      </div>
+      <div class="card" style="padding:14px">
+        <div class="sec-title">性能 / 硬件加速</div>
+        <label style="display:flex;gap:6px;align-items:center;font-size:12.5px;margin-top:6px"><input type="checkbox" ${o.hwAccel?'checked':''} onchange="updOther('hwAccel',this.checked)">启用 FFmpeg 硬件加速（NVENC / QSV / VideoToolbox）</label>
+        <div class="field" style="margin-top:10px"><label>任务并发数</label><input type="number" min="1" max="8" value="${o.taskConcurrency}" onchange="updOther('taskConcurrency',parseInt(this.value))"></div>
+      </div>
+      <div class="card" style="padding:14px">
+        <div class="sec-title">默认导出</div>
+        <div class="field"><label>分辨率</label><select onchange="updOther('exportResolution',this.value)">
+          ${['3840×2160','1920×1080','1280×720','1080×1920 (竖屏)'].map(x=>`<option ${x===o.exportResolution?'selected':''}>${x}</option>`).join('')}
+        </select></div>
+        <div class="field"><label>封装格式</label><select onchange="updOther('exportFormat',this.value)">
+          ${['MP4 (H.264)','MP4 (H.265/HEVC)','MOV (ProRes)','WebM (VP9)'].map(x=>`<option ${x===o.exportFormat?'selected':''}>${x}</option>`).join('')}
+        </select></div>
+      </div>
+      <div class="card" style="padding:14px">
+        <div class="sec-title">自动保存 / 临时文件</div>
+        <label style="display:flex;gap:6px;align-items:center;font-size:12.5px"><input type="checkbox" ${o.autoSave?'checked':''} onchange="updOther('autoSave',this.checked)">自动保存工程</label>
+        <div class="field"><label>自动保存间隔（秒）</label><input type="number" min="10" max="600" value="${o.autoSaveSec}" onchange="updOther('autoSaveSec',parseInt(this.value))"></div>
+        <div class="field"><label>临时文件保留天数</label><input type="number" min="1" max="365" value="${o.cleanupDays}" onchange="updOther('cleanupDays',parseInt(this.value))"></div>
+      </div>
+      <div class="card" style="padding:14px">
+        <div class="sec-title">路径</div>
+        <div class="field"><label>FFmpeg 路径</label><input value="${o.ffmpegPath}" onchange="updOther('ffmpegPath',this.value)"></div>
+        <div class="field"><label>临时目录</label><input value="${o.tempDir}" onchange="updOther('tempDir',this.value)"></div>
+      </div>
+    </div>`;
+  }
+}
+function providerOptions(cur,kind){
+  const map={
+    llm:['OpenAI 兼容','DeepSeek','通义千问','豆包','混元','Ollama (本地)','其他'],
+    img:['通义万相','SDXL + IP-Adapter (本地)','OpenAI DALL·E','Stable Diffusion','其他'],
+    asr:['本地 faster-whisper','OpenAI Whisper','阿里云 ASR','腾讯云 ASR','其他'],
+    tts:['Edge-TTS','CosyVoice (本地)','OpenAI TTS','火山引擎 TTS','其他'],
+    video:['通义万相','Runway','Stable Video Diffusion (本地)','Pika','其他'],
+  };
+  const opts=map[kind]||['其他'];
+  return opts.includes(cur)?opts:[cur,...opts];
+}
+window.goSettingsSub=function(id){settingsSub=id;renderStage();};
+window.toggleProvider=function(k,on){settingsState.providers[k].enabled=on;renderStage();};
+window.updProvider=function(k,key,val){settingsState.providers[k][key]=val;};
+window.testProvider=function(k){const p=settingsState.providers[k];setTask('测试连接 '+p.name+'…',30);setTimeout(()=>{p.test='ok';setTask(p.name+' ✓ 已连接',100);setTimeout(()=>setTask('空闲',0),1000);renderStage();},900);};
+window.pickPrompt=function(k){settingsState.promptEditing=k;renderStage();};
+window.updPrompt=function(key,val){settingsState.prompts[settingsState.promptEditing][key]=val;};
+window.savePrompt=function(){setTask('提示词已保存',100);setTimeout(()=>setTask('空闲',0),800);};
+window.resetPrompt=function(){const defaults={script:'请你担任资深短视频文案，根据以下需求撰写一份适合配音的画面感文案，长度约 60-80 字，语气自然：\n\n需求：{{brief}}\n风格：{{style}}\n受众：{{audience}}',humanize:'请你把以下文案改写成自然口语，去掉 AI 套话与空泛表达，加具体细节、停顿感与生活化比喻，保持原意：\n\n{{script}}',storyboard:'请将以下文案拆为 4-6 个镜头，每个镜头给出：画面描述、台词、时长秒、运镜建议，JSON 数组返回：\n\n{{script}}',narration:'请你为以下视频撰写一段解说稿，画面感强、有节奏、可二次编辑，分段输出：\n\n视频：{{title}}\n风格：{{style}}',detect:'请找出以下口播转写中的【口误/卡顿/重复/不流畅】，按 JSON 数组返回，含 issue_type / start / end / suggestion / text：\n\n{{transcript}}',keywords:'请从以下文案中抽取 5-8 个值得在字幕中高亮/花字强调的关键词或短句，JSON 数组：\n\n{{script}}'};const k=settingsState.promptEditing;if(defaults[k]){settingsState.prompts[k].body=defaults[k];renderStage();}};
+window.addPrompt=function(){const k='custom_'+Date.now();const name=prompt('新模板名称：','我的提示词');if(!name)return;settingsState.prompts[k]={name,body:'请输入提示词…\n\n{{input}}',placeholder:'{{input}}'};settingsState.promptEditing=k;renderStage();};
+window.delPrompt=function(){delete settingsState.prompts[settingsState.promptEditing];settingsState.promptEditing=Object.keys(settingsState.prompts)[0];renderStage();};
+window.updOther=function(key,val){settingsState.other[key]=val;};
+window.saveSettings=function(){setTask('已保存全部配置',100);setTimeout(()=>setTask('空闲',0),800);};
+window.resetSettings=function(){setTask('已恢复默认',100);setTimeout(()=>setTask('空闲',0),800);renderStage();};
+
+function renderInspector(){
+  const map={film:'影片属性',spoken:'口播属性',creation:'创作进度',settings:'配置概览'};
+  $('#rpTitle').textContent=map[module];
+  if(module==='film'){
+    if(filmStage==='editor'){
+      const stepIdx=editorSteps.findIndex(s=>s.id===editorSub);
+      b.innerHTML=`<div class="kpi" style="margin:0"><div class="v">${editingProj?editingProj.t:'—'}</div><div class="l">当前工程</div></div>
+        <div class="ol">${editorSteps.map((s,i)=>`<div class="it ${s.id===editorSub?'active':(i<stepIdx?'done':'')}"><span class="n">${i+1}</span>${s.name.replace(/^[①②③④⑤]/,'')} ${i<stepIdx?'✓':''}</div>`).join('')}</div>
+        <div class="muted" style="font-size:12px;line-height:1.6">剪辑台六步：生成解说文案 → 导入对齐 → 解说配音 → 自动切点 → 时间线精修 → 字幕花字导出。</div>`;
+    } else {
+      const c=filmCats.find(x=>x.id===filmCat);
+      b.innerHTML=`<div class="kpi" style="margin:0"><div class="v">${c.n}</div><div class="l">${c.name}工程数</div></div>
+        <div class="muted" style="font-size:12px;line-height:1.6">类型可扩展/改名；点击工程卡 → 进入剪辑台。</div>`;
+    }
+  } else if(module==='spoken'){
+    const v=spokenVideos.find(x=>x.id===spokenSel);
+    if(spokenStage==='fix' && v){
+      const c={gap:0,mistake:0,repeat:0,acc:0};
+      v.issues.forEach(i=>{c[i.type]++;if(i.accepted)c.acc++;});
+      b.innerHTML=`<div class="kpi" style="margin:0"><div class="v">${c.acc}/${v.issues.length}</div><div class="l">已采纳 / 总数</div></div>
+        <div class="muted" style="font-size:12px;line-height:1.6">气口 ${c.gap} · 口误 ${c.mistake} · 重复 ${c.repeat}。<br>建议默认"采纳/忽略"双选，不破坏原片。</div>`;
+    } else if(spokenStage==='flw' && v){
+      b.innerHTML=`<div class="kpi" style="margin:0"><div class="v">${(v.keywords||[]).length}</div><div class="l">关键词</div></div>
+        <div class="muted" style="font-size:12px;line-height:1.6">当前模板：<b>${flowerTpls.find(t=>t.id===editorState.flower).name}</b><br>点切换 → 字幕实时变化 → 烧录到视频。</div>`;
+    } else {
+      b.innerHTML=v?`<div class="kpi" style="margin:0"><div class="v">${v.script?'✓':'—'}</div><div class="l">文案提取</div></div>
+        <div class="muted" style="font-size:12px;line-height:1.6">保留纠正与花字：识别后可纠正气口/口误/重复，并烧录花字字幕。</div>`:
+        `<div class="muted" style="font-size:12px;line-height:1.6">上传视频并识别音频以提取文案。</div>`;
+    }
+  } else if(module==='settings'){
+    const enabled=Object.values(settingsState.providers).filter(p=>p.enabled).length;
+    const tc=Object.keys(settingsState.providers).length;
+    const pc=Object.keys(settingsState.prompts).length;
+    b.innerHTML=`<div class="kpi" style="margin:0"><div class="v">${enabled}/${tc}</div><div class="l">已启用模型</div></div>
+      <div class="kpi" style="margin:0;margin-top:8px"><div class="v">${pc}</div><div class="l">提示词模板</div></div>
+      <div class="muted" style="font-size:12px;line-height:1.6;margin-top:8px">所有密钥保存到本地系统凭据，<br>不进 SQLite 明文。<br>配置变更即时生效。</div>`;
+  } else {
+    const done=cSteps.findIndex(s=>s.id===cStage);
+    b.innerHTML=`<div class="ol">${cSteps.map((s,i)=>`<div class="it ${s.id===cStage?'active':(i<done?'done':'')}"><span class="n">${i+1}</span>${s.name}${i<done?' ✓':''}</div>`).join('')}</div>
+      <div class="muted" style="font-size:12px;line-height:1.6">七步向导：需求→文案→去AI味→分镜→图片→首尾帧视频→配音字幕→导出。</div>`;
+  }
+}
+
+/* ---------------- 总渲染 ---------------- */
+function renderAll(){renderModTabs();renderLeft();renderStage();$('#exportBtn').onclick=()=>{module='creation';cStage='export';renderAll();};}
+renderAll();
+</script>
+</body>
+</html>
