@@ -192,15 +192,21 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void) {
 
   // ---------- 创作 ----------
   const genScript = () => sim('生成文案中…', 1200, () => set((s) => ({
-    ...s, cState: { ...s.cState, script: '大家好，今天聊一个新手也能上手的事——用 AI 把文案变成视频。\n\n你只需要给个大体的需求，它就能自动写稿、拆分镜、出图片，还能配音加字幕。\n\n以前剪一条视频要折腾大半天，现在把想法交给它，剩下的交给流程。\n\n如果你也想轻松做视频，不妨试试看。' },
+    ...s,
+    cStage: 'script',
+    cState: { ...s.cState, script: '大家好，今天聊一个新手也能上手的事——用 AI 把文案变成视频。\n\n你只需要给个大体的需求，它就能自动写稿、拆分镜、出图片，还能配音加字幕。\n\n以前剪一条视频要折腾大半天，现在把想法交给它，剩下的交给流程。\n\n如果你也想轻松做视频，不妨试试看。' },
   })));
   const goHuman = () => patch({ cStage: 'human' });
   const doHuman = () => sim('去 AI 味中…', 1100, () => set((s) => ({
-    ...s, cState: { ...s.cState, human: '嗨，今天说个特适合新手的事儿——用 AI 把文案直接变成视频。\n\n你大概说个想法就行，它自己写稿、拆镜头、出图，连配音字幕都帮你弄好。\n\n以前剪一条视频得忙活大半天，现在你把点子丢给它，流程自动跑完。\n\n想轻松做视频的话，真的可以试一下。' },
+    ...s,
+    cStage: 'story',
+    cState: { ...s.cState, human: '嗨，今天说个特适合新手的事儿——用 AI 把文案直接变成视频。\n\n你大概说个想法就行，它自己写稿、拆镜头、出图，连配音字幕都帮你弄好。\n\n以前剪一条视频得忙活大半天，现在你把点子丢给它，流程自动跑完。\n\n想轻松做视频的话，真的可以试一下。' },
   })));
   const goStory = () => patch({ cStage: 'story' });
   const genStory = () => sim('生成分镜中…', 1200, () => set((s) => ({
-    ...s, cState: { ...s.cState, story: [
+    ...s,
+    cStage: 'story',
+    cState: { ...s.cState, story: [
       { desc: '开场：主持人近景微笑，背景虚化，轻松氛围。', dialogue: '嗨，今天说个特适合新手的事儿——用 AI 把文案变成视频。', dur: 5, cam: '近景' },
       { desc: '界面展示：AI 剪辑按钮高亮，光标点击。', dialogue: '你大概说个想法就行，它自己写稿、拆镜头、出图。', dur: 6, cam: '推近' },
       { desc: '动画：文案自动变成时间线与图片。', dialogue: '连配音字幕都帮你弄好，一条龙。', dur: 6, cam: '平摇' },

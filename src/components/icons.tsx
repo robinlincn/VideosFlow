@@ -1,32 +1,68 @@
-// 模块图标（简化 SVG，贴合苹果 SF Symbols 风格）
+// 模块图标 — 使用 Lucide React 专业图标库
 import React from 'react';
+import {
+  Clapperboard,
+  Mic,
+  Sparkles,
+  Settings as SettingsIcon,
+  Moon,
+  Sun,
+  PanelRight,
+  PanelRightOpen,
+  Menu,
+  X,
+  Download,
+  ChevronRight,
+} from 'lucide-react';
 
-const base = { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
+interface IconProps {
+  size?: number;
+}
 
-export const FilmIcon = (p: { size?: number }) => (
-  <svg {...base} width={p.size || 20} height={p.size || 20}>
-    <rect x="3" y="4" width="18" height="16" rx="2" />
-    <path d="M7 4v16M17 4v16M3 9h4M3 15h4M17 9h4M17 15h4" />
-  </svg>
+export const FilmIcon = ({ size = 18 }: IconProps) => (
+  <Clapperboard size={size} strokeWidth={1.6} />
 );
 
-export const MicIcon = (p: { size?: number }) => (
-  <svg {...base} width={p.size || 20} height={p.size || 20}>
-    <rect x="9" y="3" width="6" height="11" rx="3" />
-    <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
-  </svg>
+export const MicIcon = ({ size = 18 }: IconProps) => (
+  <Mic size={size} strokeWidth={1.6} />
 );
 
-export const SparkIcon = (p: { size?: number }) => (
-  <svg {...base} width={p.size || 20} height={p.size || 20}>
-    <path d="M12 3l1.8 4.7L18.5 9l-4.7 1.8L12 15l-1.8-4.2L5.5 9l4.7-1.3z" />
-    <path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z" />
-  </svg>
+export const SparkIcon = ({ size = 18 }: IconProps) => (
+  <Sparkles size={size} strokeWidth={1.6} />
 );
 
-export const GearIcon = (p: { size?: number }) => (
-  <svg {...base} width={p.size || 20} height={p.size || 20}>
-    <circle cx="12" cy="12" r="3" />
-    <path d="M19.4 13a7.6 7.6 0 0 0 0-2l2-1.5-2-3.4-2.3 1a7.6 7.6 0 0 0-1.7-1l-.3-2.6h-4l-.3 2.6a7.6 7.6 0 0 0-1.7 1l-2.3-1-2 3.4 2 1.5a7.6 7.6 0 0 0 0 2l-2 1.5 2 3.4 2.3-1a7.6 7.6 0 0 0 1.7 1l.3 2.6h4l.3-2.6a7.6 7.6 0 0 0 1.7-1l2.3 1 2-3.4z" />
-  </svg>
+export const GearIcon = ({ size = 18 }: IconProps) => (
+  <SettingsIcon size={size} strokeWidth={1.6} />
+);
+
+export const MoonIcon = ({ size = 16 }: IconProps) => (
+  <Moon size={size} strokeWidth={1.6} />
+);
+
+export const SunIcon = ({ size = 16 }: IconProps) => (
+  <Sun size={size} strokeWidth={1.6} />
+);
+
+export const InspectorIcon = ({ size = 16 }: IconProps) => (
+  <PanelRight size={size} strokeWidth={1.6} />
+);
+
+export const InspectorOpenIcon = ({ size = 16 }: IconProps) => (
+  <PanelRightOpen size={size} strokeWidth={1.6} />
+);
+
+export const MenuIcon = ({ size = 16 }: IconProps) => (
+  <Menu size={size} strokeWidth={1.6} />
+);
+
+export const CloseIcon = ({ size = 16 }: IconProps) => (
+  <X size={size} strokeWidth={1.6} />
+);
+
+export const DownloadIcon = ({ size = 14 }: IconProps) => (
+  <Download size={size} strokeWidth={1.8} />
+);
+
+export const ChevronRightIcon = ({ size = 14 }: IconProps) => (
+  <ChevronRight size={size} strokeWidth={1.8} />
 );

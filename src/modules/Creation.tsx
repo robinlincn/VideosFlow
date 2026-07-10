@@ -125,14 +125,17 @@ function StoryView() {
         <>
           <div className="sec-title">分镜文案（{cState.story.length} 镜 · 可直接修改）</div>
           {cState.story.map((s, i) => (
-            <div key={i} className="shot"><div className="body">
-              <div className="idx"><span className="tag spoken">镜头 {i + 1}</span>
-                <input className="mini" value={s.cam} onChange={(e) => actions.editStory(i, 'cam', e.target.value)} style={{ width: 90 }} placeholder="运镜" />
+            <div key={i} className="shot">
+              <div className="num">{String(i + 1).padStart(2, '0')}</div>
+              <div className="body">
+                <div className="idx"><span className="tag spoken">镜头 {i + 1}</span>
+                  <input className="mini" value={s.cam} onChange={(e) => actions.editStory(i, 'cam', e.target.value)} style={{ width: 90 }} placeholder="运镜" />
+                </div>
+                <div className="ed-row"><label>画面</label><textarea className="ed" rows={2} value={s.desc} onChange={(e) => actions.editStory(i, 'desc', e.target.value)} /></div>
+                <div className="ed-row"><label>台词</label><textarea className="ed" rows={2} value={s.dialogue} onChange={(e) => actions.editStory(i, 'dialogue', e.target.value)} /></div>
+                <div className="meta"><span>⏱ <input className="mini" value={s.dur} onChange={(e) => actions.editStory(i, 'dur', e.target.value)} style={{ width: 46 }} />秒</span></div>
               </div>
-              <div className="ed-row"><label>画面</label><textarea className="ed" rows={2} value={s.desc} onChange={(e) => actions.editStory(i, 'desc', e.target.value)} /></div>
-              <div className="ed-row"><label>台词</label><textarea className="ed" rows={2} value={s.dialogue} onChange={(e) => actions.editStory(i, 'dialogue', e.target.value)} /></div>
-              <div className="meta"><span>⏱ <input className="mini" value={s.dur} onChange={(e) => actions.editStory(i, 'dur', e.target.value)} style={{ width: 46 }} />秒</span></div>
-            </div></div>
+            </div>
           ))}
           <button className="btn" onClick={actions.goImage}>下一步：生成图片 →</button>
         </>
