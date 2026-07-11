@@ -1,7 +1,8 @@
 import React, { createContext, useContext, useRef, useState } from 'react';
 import {
-  AppState, ModuleKey,
+  AppState, ModuleKey, ProviderCfg,
 } from '../data/mock';
+import type { ProviderRow } from '../ipc/providers';
 import {
   initialFilmCats, initialFilmProjects, initialEditorState, initialSpokenVideos,
   initialSettings, initialCreation, defaultSubs,
@@ -281,6 +282,28 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void) {
     ...s, settingsState: { ...s.settingsState, other: { ...s.settingsState.other, [k]: v } },
   }));
 
+  const hydrateProviders = (rows: ProviderRow[]) => set((s) => {
+    const providers: Record<string, ProviderCfg> = {};
+    for (const r of rows) {
+      providers[r.kind] = {
+        name: r.name, provider: r.provider, baseUrl: r.baseUrl,
+        apiKey: '', model: r.model, enabled: r.enabled,
+        test: r.hasKey ? 'ok' : 'idle',
+      };
+    }
+    return { ...s, settingsState: { ...s.settingsState, providers } };
+  });
+  const setProviderTest = (kind: string, status: string) => set((s) => ({
+    ...s,
+    settingsState: {
+      ...s.settingsState,
+      providers: {
+        ...s.settingsState.providers,
+        [kind]: { ...s.settingsState.providers[kind], test: status },
+      },
+    },
+  }));
+
   return {
     set: patch, task,
     goModule, goSettingsSub,
@@ -293,6 +316,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void) {
     goImage, genImg, addRef, setRefCat, setRefCatItem, delRef, goFrames, genFrames,
     goVoice, toggleVoice, setVoiceIP, genVoice, goExport, exportCreationJianYing,
     testProvider, savePrompt, saveSettings, resetSettings, updOther,
+    hydrateProviders, setProviderTest,
   };
 }
 

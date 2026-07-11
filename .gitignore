@@ -30,3 +30,10 @@ Thumbs.db
 .env.*
 *.env
 .env.local.example
+
+# Python sidecar（venv / 缓存不入库，仅 requirements.txt 入库）
+python-sidecar/.venv/
+python-sidecar/venv/
+__pycache__/
+*.pyc
+*.pyo

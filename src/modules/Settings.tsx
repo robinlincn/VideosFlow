@@ -1,17 +1,32 @@
+import { useEffect, useRef } from 'react';
 import { useApp } from '../state/AppContext';
 import { settingsSteps } from '../data/mock';
+import {
+  loadProviders, saveProvider, setProviderKey, testProvider as ipcTestProvider,
+} from '../ipc/providers';
 
 const PROVIDER_OPTS: Record<string, string[]> = {
-  llm: ['OpenAI 兼容', 'DeepSeek', '通义', '豆包', '混元', 'Ollama'],
-  img: ['通义万相', 'SDXL', 'DALL·E', 'Midjourney'],
-  asr: ['本地 faster-whisper', '云 ASR', 'Whisper'],
-  tts: ['Edge-TTS', 'CosyVoice', '云 TTS'],
-  video: ['Runway', '通义万相', 'SVD', 'Pika'],
+  llm: ['Agnes', 'OpenAI 兼容', 'DeepSeek', '通义', '豆包', '混元', 'Ollama'],
+  img: ['Agnes', '通义万相', 'SDXL', 'DALL·E', 'Midjourney'],
+  asr: ['Agnes', '云 ASR', '本地 faster-whisper', 'Whisper'],
+  tts: ['Mimo', 'Edge-TTS', 'CosyVoice', '云 TTS'],
+  video: ['Agnes', 'Runway', '通义万相', 'SVD', 'Pika'],
 };
 
 export default function Settings() {
   const { state, actions } = useApp();
-  const { settingsSub, settingsState } = state;
+  const { settingsSub } = state;
+
+  // 挂载时从后端拉取真实 Provider 配置（仅一次）
+  const hydrated = useRef(false);
+  useEffect(() => {
+    if (hydrated.current) return;
+    hydrated.current = true;
+    loadProviders()
+      .then((rows) => actions.hydrateProviders(rows))
+      .catch(() => {});
+  }, [actions]);
+
   return (
     <div>
       <StepPills current={settingsSub} onPick={actions.goSettingsSub} />
@@ -37,16 +52,52 @@ function StepPills({ current, onPick }: { current: string; onPick: (id: string) 
 function ApiView() {
   const { state, actions } = useApp();
   const { providers } = state.settingsState;
+
+  const handleSave = async () => {
+    actions.task('保存配置中…', 40);
+    try {
+      for (const k of Object.keys(providers)) {
+        const p = providers[k];
+        await saveProvider({
+          kind: k, name: p.name, provider: p.provider,
+          baseUrl: p.baseUrl, model: p.model, enabled: p.enabled,
+        });
+        if (p.apiKey && p.apiKey.trim()) {
+          await setProviderKey(k, p.apiKey.trim());
+        }
+      }
+      actions.task('配置已保存 ✓', 100);
+    } catch (e) {
+      actions.task('保存失败: ' + String(e), 100);
+    }
+  };
+
+  const handleTest = async (k: string) => {
+    actions.setProviderTest(k, 'testing');
+    try {
+      const res = await ipcTestProvider(k);
+      actions.setProviderTest(k, res === 'ok' ? 'ok' : 'fail');
+    } catch (e) {
+      actions.setProviderTest(k, 'fail');
+    }
+  };
+
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-        <button className="btn sm ok" onClick={actions.saveSettings}>💾 保存全部配置</button>
+        <button className="btn sm ok" onClick={handleSave}>💾 保存全部配置</button>
         <button className="btn sm ghost" onClick={actions.resetSettings}>↻ 恢复默认</button>
       </div>
       <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
         {Object.keys(providers).map((k) => {
           const p = providers[k];
-          const status = p.test === 'ok' ? '✓ 已连接' : p.test === 'local' ? '本地' : p.test === 'idle' ? '未测试' : p.test;
+          const status =
+            p.test === 'ok' ? '✓ 已连接'
+            : p.test === 'local' ? '本地'
+            : p.test === 'testing' ? '测试中…'
+            : p.test === 'fail' ? '连接失败'
+            : p.test === 'idle' ? '未测试'
+            : p.test;
           return (
             <div key={k} className="pcard">
               <div className="ph"><span className="dot" /><b>{p.name}</b>
@@ -60,7 +111,7 @@ function ApiView() {
               <div className="field"><label>模型</label><input value={p.model} onChange={(e) => actions.set({ settingsState: { ...state.settingsState, providers: { ...state.settingsState.providers, [k]: { ...p, model: e.target.value } } } })} /></div>
               <div className="field"><label>API Key</label><input type="password" value={p.apiKey} placeholder="存入系统凭据，不进 SQLite 明文" onChange={(e) => actions.set({ settingsState: { ...state.settingsState, providers: { ...state.settingsState.providers, [k]: { ...p, apiKey: e.target.value } } } })} /></div>
               <div style={{ display: 'flex', gap: 8, marginTop: 6, alignItems: 'center' }}>
-                <button className="btn sm ghost" onClick={() => actions.testProvider(k)}>🔌 测试连接</button>
+                <button className="btn sm ghost" onClick={() => handleTest(k)} disabled={p.test === 'testing'}>🔌 测试连接</button>
                 <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, color: 'var(--muted)' }}>
                   <input type="checkbox" checked={p.enabled} onChange={(e) => actions.set({ settingsState: { ...state.settingsState, providers: { ...state.settingsState.providers, [k]: { ...p, enabled: e.target.checked } } } })} /> 启用
                 </label>
