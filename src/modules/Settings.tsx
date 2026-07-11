@@ -1,8 +1,9 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../state/AppContext';
 import { settingsSteps } from '../data/mock';
 import {
   loadProviders, saveProvider, setProviderKey, testProvider as ipcTestProvider,
+  submitChatTask,
 } from '../ipc/providers';
 
 const PROVIDER_OPTS: Record<string, string[]> = {
@@ -52,6 +53,10 @@ function StepPills({ current, onPick }: { current: string; onPick: (id: string) 
 function ApiView() {
   const { state, actions } = useApp();
   const { providers } = state.settingsState;
+  const [chatPrompt, setChatPrompt] = useState('用一句话介绍 VideosFlow');
+  const [chatLog, setChatLog] = useState<string[]>([]);
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatAnswer, setChatAnswer] = useState<string | null>(null);
 
   const handleSave = async () => {
     actions.task('保存配置中…', 40);
@@ -79,6 +84,23 @@ function ApiView() {
       actions.setProviderTest(k, res === 'ok' ? 'ok' : 'fail');
     } catch (e) {
       actions.setProviderTest(k, 'fail');
+    }
+  };
+
+  const handleChat = async () => {
+    setChatBusy(true);
+    setChatAnswer(null);
+    setChatLog([]);
+    try {
+      await submitChatTask(chatPrompt, (m) => {
+        setChatLog((l) => [...l, `[${Math.round(m.progress)}% · ${m.status}] ${m.message || ''}`]);
+        const ans = (m.payload as any)?.answer;
+        if (ans) setChatAnswer(ans);
+      });
+    } catch (e) {
+      setChatLog((l) => [...l, '失败: ' + String(e)]);
+    } finally {
+      setChatBusy(false);
     }
   };
 
@@ -119,6 +141,24 @@ function ApiView() {
             </div>
           );
         })}
+      </div>
+      <div className="pcard" style={{ marginTop: 14 }}>
+        <div className="ph"><span className="dot" /><b>链路验证 · 真实 Agnes /v1/chat</b>
+          <span className="tag key" style={{ marginLeft: 'auto' }}>全链路</span></div>
+        <div className="muted sm" style={{ marginBottom: 8 }}>填好 LLM 的 API Key 并「保存全部配置」后，点击下方按钮会经「Rust 命令 → Python sidecar → Agnes /chat/completions」真实调用一次对话，回答经进度通道回传。用于验证 M1 全链路打通。</div>
+        <div className="field"><label>测试提示词</label>
+          <textarea rows={2} value={chatPrompt} onChange={(e) => setChatPrompt(e.target.value)} />
+        </div>
+        <button className="btn sm ok" onClick={handleChat} disabled={chatBusy}>🚀 发送真实对话</button>
+        {chatLog.length > 0 && (
+          <pre style={{ marginTop: 10, whiteSpace: 'pre-wrap', fontSize: 12, color: 'var(--muted)', fontFamily: "var(--mono, 'Geist Mono', monospace)" }}>{chatLog.join('\n')}</pre>
+        )}
+        {chatAnswer && (
+          <div style={{ marginTop: 8, padding: 10, borderLeft: '3px solid var(--accent, #b85c38)', background: 'var(--surface-2, rgba(0,0,0,0.03))' }}>
+            <b>Agnes 回答：</b>
+            <div style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>{chatAnswer}</div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -138,20 +138,49 @@ async function mockInvoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
       const a = (args || {}) as any;
       const taskId = 'mock-' + Math.random().toString(36).slice(2);
       const ch = a.on_progress;
+      const kind = a.kind;
       if (ch && ch.__mockChannel && ch._on) {
-        const steps = [5, 30, 60, 100];
-        steps.forEach((p, i) =>
-          setTimeout(
-            () =>
-              ch._on({
-                taskId,
-                progress: p,
-                status: i === steps.length - 1 ? 'done' : 'running',
-                message: i === steps.length - 1 ? '完成' : '处理中',
-              }),
-            300 + i * 300,
-          ),
-        );
+        if (kind === 'chat') {
+          // 浏览器回退：模拟真实 Agnes 对话链路（无 Rust/sidecar 时 UI 可点验）
+          const prompt = (a.payload && a.payload.prompt) || 'ping';
+          const steps = [5, 60, 100];
+          steps.forEach((p, i) =>
+            setTimeout(() => {
+              if (i === steps.length - 1) {
+                ch._on({
+                  taskId,
+                  progress: 100,
+                  status: 'done',
+                  message: '真实对话完成（mock）',
+                  payload: {
+                    answer: `（mock）关于「${prompt}」：VideosFlow 是一款基于 AI 的智能视频生产工作室，帮你把想法变成成片。`,
+                  },
+                });
+              } else {
+                ch._on({
+                  taskId,
+                  progress: p,
+                  status: 'running',
+                  message: i === 0 ? '任务入队' : 'AI 引擎可达',
+                });
+              }
+            }, 300 + i * 400),
+          );
+        } else {
+          const steps = [5, 30, 60, 100];
+          steps.forEach((p, i) =>
+            setTimeout(
+              () =>
+                ch._on({
+                  taskId,
+                  progress: p,
+                  status: i === steps.length - 1 ? 'done' : 'running',
+                  message: i === steps.length - 1 ? '完成' : '处理中',
+                }),
+              300 + i * 300,
+            ),
+          );
+        }
       }
       return taskId as any;
     }

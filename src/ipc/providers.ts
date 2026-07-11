@@ -58,3 +58,13 @@ export async function submitTask(input: {
     onProgress: ch,
   });
 }
+
+/** M1 链路验证：提交一个真实 Agnes /v1/chat 任务，订阅进度（含回答）。
+ *  后端 task_submit 的 chat 任务会经 sidecar 真实调用 Agnes，回答经进度通道回传。 */
+export async function submitChatTask(
+  prompt: string,
+  onProgress: (m: ProgressMsg) => void,
+  maxTokens = 512,
+): Promise<string> {
+  return submitTask({ kind: 'chat', payload: { prompt, maxTokens }, onProgress });
+}

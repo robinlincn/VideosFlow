@@ -53,9 +53,35 @@ pub struct SidecarGuard {
     pub port: u16,
 }
 
-fn find_python() -> Option<String> {
-    for interp in ["python", "python3", "py"] {
-        if Command::new(interp)
+fn find_python(resource_dir: &Path) -> Option<String> {
+    // 1) 显式覆盖（优先，便于 CI/特殊环境指定解释器）
+    if let Ok(p) = std::env::var("VF_PYTHON") {
+        if !p.is_empty() {
+            return Some(p);
+        }
+    }
+    // 2) sidecar 随附 venv（优先，避免污染系统 Python）
+    let venv_rel = if cfg!(windows) {
+        ".venv/Scripts/python.exe"
+    } else {
+        ".venv/bin/python"
+    };
+    let sc_dirs = [
+        resource_dir.join("python-sidecar"),
+        resource_dir.join("..").join("python-sidecar"),
+        resource_dir.join("..").join("..").join("python-sidecar"),
+    ];
+    let mut candidates: Vec<String> = Vec::new();
+    for d in sc_dirs.iter() {
+        candidates.push(d.join(venv_rel).to_string_lossy().to_string());
+    }
+    // 3) 回退到 PATH 中的解释器
+    candidates.extend(["python".to_string(), "python3".to_string(), "py".to_string()]);
+    for interp in candidates {
+        if interp.is_empty() {
+            continue;
+        }
+        if Command::new(&interp)
             .arg("--version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -63,7 +89,7 @@ fn find_python() -> Option<String> {
             .map(|s| s.success())
             .unwrap_or(false)
         {
-            return Some(interp.to_string());
+            return Some(interp);
         }
     }
     None
@@ -90,7 +116,7 @@ pub fn spawn_sidecar(resource_dir: &Path, port: u16) -> SidecarGuard {
         child: Mutex::new(None),
         port,
     };
-    let interp = match find_python() {
+    let interp = match find_python(resource_dir) {
         Some(i) => i,
         None => {
             eprintln!("[videosflow] 未找到 Python 解释器，sidecar 未启动（不影响应用启动）");
@@ -171,6 +197,19 @@ pub async fn call_endpoint(
 ) -> Result<Envelope, String> {
     let body = serde_json::json!({ "cfg": cfg, "req": req });
     post_envelope(client, port, &format!("/v1/{endpoint}"), &body).await
+}
+
+/// 真实对话：POST /v1/chat { cfg, req:{prompt, max_tokens} }。
+/// 用于连接测试与链路验证（打通 Rust→sidecar→Agnes 全链路）。
+pub async fn call_chat(
+    client: &reqwest::Client,
+    port: u16,
+    cfg: &ProviderCfg,
+    prompt: &str,
+    max_tokens: u32,
+) -> Result<Envelope, String> {
+    let req = serde_json::json!({ "prompt": prompt, "max_tokens": max_tokens });
+    call_endpoint(client, port, "chat", cfg, req).await
 }
 
 /// 由 DB 行 + 凭据库 key 组装完整 ProviderCfg（供连接测试转发）。

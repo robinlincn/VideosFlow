@@ -20,7 +20,7 @@
 | **Editorial Design System v3.0**（自研 CSS 设计系统 + Lucide 图标） | ✅ 已落地 |
 | 响应式 + light/dark 双主题 | ✅ 已落地 |
 | 剪映 `draft_content.json` 导出（mock 构造） | ✅ 已落地 |
-| AI 引擎 / FFmpeg / SQLite 真实能力 | ❌ **全无，均为 mock** |
+| AI 引擎 / FFmpeg / SQLite 真实能力 | 🟡 **M0 基础设施已落地**（SQLite 12表 / Python sidecar 守护 / 任务队列+进度Channel / FFmpeg封装+首启下载器 / Tauri IPC 8命令 / Settings 真实读写）；真实 AI 调用待 M1+ 接 Agnes/Mimo |
 
 **一句话**：UI 是个「漂亮空壳」，所有能力按钮点了跑的是前端模拟（`sim()`），没有真后端。
 
@@ -183,12 +183,16 @@ src/
 | Provider 配置真实持久化 + 连接测试（**默认填充 Agnes**：`https://apihub.agnes-ai.com/v1`，模型 `agnes-2.0-flash` / `agnes-image-2.1-flash` / `agnes-video-v2.0`） | `commands.rs`, `db.rs`, `src/ipc/providers.ts` | db |
 **验收**：启动 app → Python sidecar 自动起 → FFmpeg 首启下载成功（`ffmpeg -version` 可用）→ 在设置页填真实 Agnes Key → 连接测试返回 `ok`；关闭重启配置不丢。
 
+**状态（M0 续做 · 2026-07-11）**：M0 代码已全部写完并提交 GitHub（commit `d9815ca`，26 文件 +1684 行）。前端 `npm run build`（tsc + vite）零错误通过；Rust 因沙箱无 cargo 工具链未编译，需 Boos 本机 `npm run tauri:dev` 编译验收（重点验证：sidecar 自动启动、SQLite 首次建表/种子、设置页连接测试、任务进度 Channel）。详见 §0.1 状态表。
+
 #### M1 — 设置模块真实化（最早见效，打通链路）
 | 任务 | 文件 | 依赖 |
 |------|------|------|
 | 设置页 API/提示词/参数三个子页接真实读写 | `src/modules/Settings.tsx` | M0 |
 | Provider 测试命令接真实 Agnes（LLM ping / 图像试生成 / 视频试生成） | `python-sidecar/routers/*` | M0 |
 **验收**：填真实 Key 能跑通一次最小 Agnes LLM 调用；提示词模板 `{{brief}}` 变量可替换。
+
+**状态（M1 · 2026-07-11）**：M1 代码已完成。核心改动：`provider_test` 对 LLM 显式走 sidecar 真实 `/v1/chat`（prompt "ping" / max_tokens 1）打通全链路；`task_submit` 新增 `chat` 任务类型，worker（`tasks.rs::run_chat`）取 llm provider 配置 + 系统凭据库 Key → 经 sidecar `/v1/chat` 真实调用 Agnes → 回答经进度 Channel 回传；前端 Settings 增加「链路验证·真实 Agnes /v1/chat」卡片触发真实对话，`client.ts` mock 同步支持 `chat` 任务（纯 npm run dev 不崩）；`python.rs::find_python` 增强优先用 `python-sidecar/.venv` 解释器，确保 `tauri:dev` 能拉起 sidecar。前端 `npm run build` 零错误；Rust 待本机 `tauri:dev` 编译验收。
 
 #### M2 — 影片模块
 | 任务 | 文件 | 依赖 |

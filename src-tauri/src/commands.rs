@@ -71,7 +71,13 @@ pub async fn provider_test(state: State<'_, AppState>, kind: String) -> Result<S
     let row = db::get_by_kind(&state.pool, &kind).await?;
     let key = cred::get_key(&kind)?;
     let cfg = python::build_cfg(&row, key);
-    let env = python::call_test(&state.client, state.sidecar_port, &cfg).await?;
+    // M1：LLM 走 sidecar 真实的 /v1/chat 最小调用（填真 Key 打通全链路）；
+    // 其余能力暂走 /v1/test 连通性校验（真实生成/试生成留待 M2-M5）。
+    let env = if kind == "llm" {
+        python::call_chat(&state.client, state.sidecar_port, &cfg, "ping", 1).await?
+    } else {
+        python::call_test(&state.client, state.sidecar_port, &cfg).await?
+    };
     if env.ok {
         Ok("ok".into())
     } else {
