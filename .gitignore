@@ -24,3 +24,9 @@ Thumbs.db
 
 # 临时
 *.tmp
+
+# 本地密钥 / 环境（绝不入库！API Key 由用户在设置页填，存系统凭据库）
+.env
+.env.*
+*.env
+.env.local.example
