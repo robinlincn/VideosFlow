@@ -1,5 +1,6 @@
 // VideosFlow — Tauri2 应用入口
 // M0 基础设施：SQLite 建表 + Python sidecar 守护 + 任务队列 + IPC 命令 + 进度 Channel。
+// M2：注册 film_* 命令。
 
 mod commands;
 mod cred;
@@ -55,7 +56,7 @@ pub fn run() {
 
                 // 任务队列 + worker
                 let (tx, rx) = tokio::sync::mpsc::channel::<tasks::TaskJob>(32);
-                tasks::start(pool.clone(), client.clone(), port, rx);
+                tasks::start(pool.clone(), client.clone(), port, data_dir.clone(), rx);
 
                 handle.manage(AppState {
                     pool,
@@ -78,6 +79,21 @@ pub fn run() {
             commands::provider_test,
             commands::task_submit,
             commands::task_status,
+            // ---- M2 film 命令 ----
+            commands::film_category_list,
+            commands::film_category_create,
+            commands::film_category_rename,
+            commands::film_category_reorder,
+            commands::film_category_delete,
+            commands::film_project_list,
+            commands::film_project_create,
+            commands::film_project_update,
+            commands::film_project_delete,
+            commands::film_timeline_load,
+            commands::film_timeline_save,
+            commands::film_import,
+            commands::film_smart_cut,
+            commands::film_export,
         ])
         .run(tauri::generate_context!())
         .expect("error while running VideosFlow");

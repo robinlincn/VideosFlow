@@ -1,9 +1,11 @@
 // VideosFlow — SQLite 持久层（sqlx）
 // M0：12 张表首次启动建表（幂等）+ 双网关默认 Provider 种子 + Provider/Task CRUD。
+// M2：film_categories / film_projects / edit_timelines 全量 CRUD + 时间线领域模型。
 
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
+use std::collections::HashMap;
 
 /// 单个能力网关配置（对应前端 ProviderCfg，但密钥不在此表，存系统凭据库）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +29,122 @@ pub struct TaskStatus {
     pub status: String,
     pub progress: f64,
     pub log: String,
+}
+
+// ---------------------------------------------------------------------------
+// M2：时间线领域模型（序列化为 edit_timelines.tracks / clips 的 JSON）
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AsrSegment {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+    #[serde(default)]
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptSeg {
+    pub index: usize,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineClip {
+    pub id: String,
+    #[serde(default)]
+    pub source: String,
+    pub timeline_start: f64,
+    pub timeline_end: f64,
+    pub src_start: f64,
+    pub src_end: f64,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub flower: String,
+    #[serde(default = "default_transition")]
+    pub transition: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineTrack {
+    pub id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "default_one_f")]
+    pub volume: f64,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub clips: Vec<TimelineClip>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineEnvelope {
+    #[serde(default)]
+    pub asr: Vec<AsrSegment>,
+    #[serde(default)]
+    pub script_segs: Vec<ScriptSeg>,
+    #[serde(default)]
+    pub alignment: HashMap<String, (f64, f64)>,
+    #[serde(default)]
+    pub tracks: Vec<TimelineTrack>,
+    #[serde(default)]
+    pub video_path: String,
+}
+
+fn default_transition() -> String {
+    "none".into()
+}
+fn default_one_f() -> f64 {
+    1.0
+}
+
+// ---------------------------------------------------------------------------
+// M2：film 三表行结构
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilmCategoryRow {
+    pub id: String,
+    pub name: String,
+    pub order: i64,
+    pub editable: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilmProjectRow {
+    pub id: String,
+    pub category_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub cover: Option<String>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub tags: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineRow {
+    pub id: String,
+    pub project_id: String,
+    pub tracks: String,
+    pub clips: String,
+    pub updated_at: i64,
 }
 
 fn now_secs() -> i64 {
@@ -212,4 +330,273 @@ pub async fn task_get(pool: &SqlitePool, id: &str) -> Result<TaskStatus, String>
         progress: r.try_get("progress").map_err(|e| e.to_string())?,
         log: r.try_get("log").map_err(|e| e.to_string())?,
     })
+}
+
+// ---------------------------------------------------------------------------
+// M2：film_categories CRUD
+// ---------------------------------------------------------------------------
+
+pub async fn film_category_list(pool: &SqlitePool) -> Result<Vec<FilmCategoryRow>, String> {
+    let rows = sqlx::query("SELECT id, name, \"order\", editable FROM film_categories ORDER BY \"order\"")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(FilmCategoryRow {
+            id: r.try_get("id").map_err(|e| e.to_string())?,
+            name: r.try_get("name").map_err(|e| e.to_string())?,
+            order: r.try_get("order").map_err(|e| e.to_string())?,
+            editable: r.try_get("editable").map_err(|e| e.to_string())?,
+        });
+    }
+    Ok(out)
+}
+
+pub async fn film_category_create(pool: &SqlitePool, name: &str, order: i64) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO film_categories(id, name, \"order\", editable) VALUES(?, ?, ?, 1)")
+        .bind(&id)
+        .bind(name)
+        .bind(order)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+pub async fn film_category_rename(pool: &SqlitePool, id: &str, name: &str) -> Result<(), String> {
+    sqlx::query("UPDATE film_categories SET name=? WHERE id=?")
+        .bind(name)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn film_category_reorder(pool: &SqlitePool, id: &str, order: i64) -> Result<(), String> {
+    sqlx::query("UPDATE film_categories SET \"order\"=? WHERE id=?")
+        .bind(order)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 删除：strategy = "merge" 归并到 target_id；"cascade" 级联删其工程+timeline。
+pub async fn film_category_delete(
+    pool: &SqlitePool,
+    id: &str,
+    strategy: &str,
+    target_id: Option<&str>,
+) -> Result<(), String> {
+    if strategy == "merge" {
+        if let Some(target) = target_id {
+            sqlx::query("UPDATE film_projects SET category_id=? WHERE category_id=?")
+                .bind(target)
+                .bind(id)
+                .execute(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        sqlx::query("DELETE FROM film_categories WHERE id=?")
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    } else {
+        // cascade：先删工程下的 timeine，再删工程，再删分类
+        let pids = sqlx::query("SELECT id FROM film_projects WHERE category_id=?")
+            .bind(id)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        for p in pids {
+            let pid: String = p.try_get("id").map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM edit_timelines WHERE project_id=?")
+                .bind(&pid)
+                .execute(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        sqlx::query("DELETE FROM film_projects WHERE category_id=?")
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        sqlx::query("DELETE FROM film_categories WHERE id=?")
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// M2：film_projects CRUD
+// ---------------------------------------------------------------------------
+
+pub async fn film_project_list(pool: &SqlitePool, category_id: &str) -> Result<Vec<FilmProjectRow>, String> {
+    let rows = sqlx::query(
+        "SELECT id, category_id, title, cover, status, tags, created_at FROM film_projects WHERE category_id=? ORDER BY created_at DESC",
+    )
+    .bind(category_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(FilmProjectRow {
+            id: r.try_get("id").map_err(|e| e.to_string())?,
+            category_id: r.try_get("category_id").map_err(|e| e.to_string())?,
+            title: r.try_get("title").map_err(|e| e.to_string())?,
+            cover: r.try_get("cover").map_err(|e| e.to_string())?,
+            status: r.try_get("status").map_err(|e| e.to_string()).unwrap_or_default(),
+            tags: r.try_get("tags").map_err(|e| e.to_string()).unwrap_or_default(),
+            created_at: r.try_get("created_at").map_err(|e| e.to_string())?,
+        });
+    }
+    Ok(out)
+}
+
+pub async fn film_project_create(
+    pool: &SqlitePool,
+    category_id: &str,
+    title: &str,
+    cover: Option<&str>,
+) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO film_projects(id, category_id, title, cover, status, tags, created_at) VALUES(?, ?, ?, ?, '草稿', '', ?)",
+    )
+    .bind(&id)
+    .bind(category_id)
+    .bind(title)
+    .bind(cover)
+    .bind(now_secs())
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+pub async fn film_project_update(
+    pool: &SqlitePool,
+    id: &str,
+    title: Option<&str>,
+    cover: Option<&str>,
+    status: Option<&str>,
+    tags: Option<&str>,
+) -> Result<(), String> {
+    let mut sets: Vec<&str> = Vec::new();
+    if title.is_some() {
+        sets.push("title=?");
+    }
+    if cover.is_some() {
+        sets.push("cover=?");
+    }
+    if status.is_some() {
+        sets.push("status=?");
+    }
+    if tags.is_some() {
+        sets.push("tags=?");
+    }
+    if sets.is_empty() {
+        return Ok(());
+    }
+    let sql = format!("UPDATE film_projects SET {} WHERE id=?", sets.join(", "));
+    let mut q = sqlx::query(&sql);
+    if let Some(v) = title {
+        q = q.bind(v);
+    }
+    if let Some(v) = cover {
+        q = q.bind(v);
+    }
+    if let Some(v) = status {
+        q = q.bind(v);
+    }
+    if let Some(v) = tags {
+        q = q.bind(v);
+    }
+    q = q.bind(id);
+    q.execute(pool).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn film_project_delete(pool: &SqlitePool, id: &str) -> Result<(), String> {
+    sqlx::query("DELETE FROM edit_timelines WHERE project_id=?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    sqlx::query("DELETE FROM film_projects WHERE id=?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// M2：edit_timelines CRUD
+// ---------------------------------------------------------------------------
+
+pub async fn timeline_get(pool: &SqlitePool, project_id: &str) -> Result<Option<TimelineRow>, String> {
+    let r = sqlx::query("SELECT id, project_id, tracks, clips, updated_at FROM edit_timelines WHERE project_id=? LIMIT 1")
+        .bind(project_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(r.map(|row| TimelineRow {
+        id: row.try_get("id").map_err(|e| e.to_string()).unwrap_or_default(),
+        project_id: row.try_get("project_id").map_err(|e| e.to_string()).unwrap_or_default(),
+        tracks: row.try_get("tracks").map_err(|e| e.to_string()).unwrap_or_default(),
+        clips: row.try_get("clips").map_err(|e| e.to_string()).unwrap_or_default(),
+        updated_at: row.try_get("updated_at").map_err(|e| e.to_string()).unwrap_or_default(),
+    }))
+}
+
+pub async fn timeline_save(
+    pool: &SqlitePool,
+    project_id: &str,
+    tracks_json: &str,
+    clips_json: &str,
+) -> Result<String, String> {
+    let existing: Option<String> = sqlx::query("SELECT id FROM edit_timelines WHERE project_id=?")
+        .bind(project_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .and_then(|r| r.try_get::<String, _>("id").ok());
+    match existing {
+        Some(id) => {
+            sqlx::query("UPDATE edit_timelines SET tracks=?, clips=?, updated_at=? WHERE id=?")
+                .bind(tracks_json)
+                .bind(clips_json)
+                .bind(now_secs())
+                .bind(&id)
+                .execute(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(id)
+        }
+        None => {
+            let id = uuid::Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO edit_timelines(id, project_id, tracks, clips, updated_at) VALUES(?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(project_id)
+            .bind(tracks_json)
+            .bind(clips_json)
+            .bind(now_secs())
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(id)
+        }
+    }
 }

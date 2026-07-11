@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 
 import httpx
 
-from models import Envelope, ProviderCfg
+from models import AsrRequest, Envelope, ProviderCfg
 
 
 class BaseProvider(ABC):
@@ -59,3 +59,11 @@ class BaseProvider(ABC):
     @abstractmethod
     def capabilities(self) -> List[str]:
         ...
+
+    async def asr(self, req: AsrRequest) -> Envelope:
+        """语音识别：默认未实现（占位）。子类（如 Agnes）按需覆盖。
+
+        M2 按冻结决策 Q1：默认返回清晰的「未就绪 / 降级」信封，
+        由 Rust 端 film_import 任务捕获后降级处理，绝不阻塞导入→对齐链路。
+        """
+        raise NotImplementedError("该网关不支持 ASR")

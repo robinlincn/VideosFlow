@@ -1,13 +1,18 @@
-import React, { createContext, useContext, useRef, useState } from 'react';
+import React, { createContext, useContext, useRef, useState, useEffect } from 'react';
 import {
   AppState, ModuleKey, ProviderCfg,
 } from '../data/mock';
-import type { ProviderRow } from '../ipc/providers';
+import type { ProviderRow, ProgressMsg, FilmCategory, FilmProject, TimelineEnvelope, TimelineClip } from '../ipc/types';
 import {
   initialFilmCats, initialFilmProjects, initialEditorState, initialSpokenVideos,
-  initialSettings, initialCreation, defaultSubs,
+  initialSettings, initialCreation, defaultSubs, type EditorState as EditorStateType,
 } from '../data/mock';
 import { downloadJson, toSec } from '../lib/jianying';
+import {
+  loadFilmCats, createFilmCategory, renameFilmCategory, reorderFilmCategory, deleteFilmCategory,
+  loadFilmProjects, createFilmProject, updateFilmProject, deleteFilmProject,
+  loadTimeline, saveTimeline as persistTimeline, submitFilmImport, submitFilmSmartCut, submitFilmExport,
+} from '../ipc/providers';
 
 const initialState: AppState = {
   module: 'film',
@@ -38,7 +43,41 @@ export function useApp() {
   return c;
 }
 
-function buildActions(set: SetState, task: (l: string, p?: number) => void) {
+/** 把一个秒数格式化为 m:ss（配音字幕时间轴展示用）。 */
+function fmtSec(s: number): string {
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+/** 构建一个新的工程级 EditorState（清空导入/对齐/时间线状态）。 */
+function freshEditorState(projectId: string, videoName: string): EditorStateType {
+  return {
+    projectId,
+    videoName,
+    videoPath: '',
+    script: initialEditorState.script,
+    imported: false,
+    aligned: false,
+    alignedPct: 0,
+    asr: [],
+    timeline: null,
+    voiceMix: initialEditorState.voiceMix,
+    flower: initialEditorState.flower,
+    selectedClipId: null,
+    exportOpts: { ...initialEditorState.exportOpts },
+    voiceLines: null,
+  };
+}
+
+/** 把 TimelineEnvelope 扁平化出所有 clip（导出与时间线保存用）。 */
+function flattenClips(env: TimelineEnvelope): TimelineClip[] {
+  const out: TimelineClip[] = [];
+  for (const tr of env.tracks) for (const c of tr.clips) out.push(c);
+  return out;
+}
+
+function buildActions(set: SetState, task: (l: string, p?: number) => void, get: () => AppState) {
   const sim = (label: string, ms: number, fn: () => void) => {
     task(label, 40);
     window.setTimeout(() => {
@@ -53,53 +92,298 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void) {
   const goModule = (m: ModuleKey) => patch({ module: m });
   const goSettingsSub = (id: string) => patch({ settingsSub: id });
 
-  // ---------- 影片 ----------
-  const importFilm = () => {
-    const cat = initialState.filmCat;
-    set((s) => {
-      const projects = { ...s.filmProjects };
-      const list = projects[s.filmCat] || [];
-      const name = '新素材 ' + (list.length + 1);
-      projects[s.filmCat] = [...list, { t: name, s: '草稿' }];
-      const cats = s.filmCats.map((c) => c.id === s.filmCat ? { ...c, n: c.n + 1 } : c);
-      return { ...s, filmProjects: projects, filmCats: cats, editingProj: { cat: s.filmCat, t: name }, filmStage: 'editor', editorSub: 'gen' };
-    });
+  // ---------- 影片：数据加载 ----------
+  const loadProjects = async (catId: string) => {
+    try {
+      const list = await loadFilmProjects(catId);
+      set((s) => ({ ...s, filmProjects: { ...s.filmProjects, [catId]: list } }));
+    } catch {
+      /* 保持已有回退数据 */
+    }
   };
-  const openEditor = (cat: string, t: string) =>
-    patch({ editingProj: { cat, t }, filmStage: 'editor', editorSub: 'gen', filmCat: cat });
+
+  const initFilm = async () => {
+    try {
+      const cats = await loadFilmCats();
+      const projects: Record<string, FilmProject[]> = {};
+      await Promise.all(cats.map(async (c) => {
+        try { projects[c.id] = await loadFilmProjects(c.id); } catch { projects[c.id] = []; }
+      }));
+      set((s) => ({ ...s, filmCats: cats, filmProjects: projects }));
+    } catch {
+      /* 保持初始 mock 回退 */
+    }
+  };
+
+  // ---------- 影片：类型树 CRUD ----------
+  const switchCat = async (catId: string) => {
+    patch({ filmCat: catId });
+    await loadProjects(catId);
+  };
+
+  const createCat = async (name: string) => {
+    const cats = get().filmCats;
+    const order = cats.reduce((m, c) => Math.max(m, c.order), 0) + 1;
+    try {
+      await createFilmCategory(name, order);
+      const next = await loadFilmCats();
+      set((s) => ({ ...s, filmCats: next }));
+      task('已新建类型 ✓', 100);
+    } catch (e) {
+      task('新建类型失败：' + String(e), 100);
+    }
+  };
+
+  const renameCat = async (id: string, name: string) => {
+    try {
+      await renameFilmCategory(id, name);
+      const next = await loadFilmCats();
+      set((s) => ({ ...s, filmCats: next }));
+    } catch (e) { task('重命名失败：' + String(e), 100); }
+  };
+
+  const reorderCat = async (id: string, order: number) => {
+    try {
+      await reorderFilmCategory(id, order);
+      const next = await loadFilmCats();
+      set((s) => ({ ...s, filmCats: next }));
+    } catch (e) { task('排序失败：' + String(e), 100); }
+  };
+
+  const moveCat = async (id: string, dir: -1 | 1) => {
+    const cats = [...get().filmCats].sort((a, b) => a.order - b.order);
+    const idx = cats.findIndex((c) => c.id === id);
+    const swap = idx + dir;
+    if (idx < 0 || swap < 0 || swap >= cats.length) return;
+    const a = cats[idx];
+    const b = cats[swap];
+    try {
+      await reorderFilmCategory(a.id, b.order);
+      await reorderFilmCategory(b.id, a.order);
+      const next = await loadFilmCats();
+      set((s) => ({ ...s, filmCats: next }));
+    } catch (e) { task('排序失败：' + String(e), 100); }
+  };
+
+  const deleteCat = async (id: string, strategy: string, targetId?: string) => {
+    try {
+      await deleteFilmCategory(id, strategy, targetId);
+      const next = await loadFilmCats();
+      set((s) => ({ ...s, filmCats: next }));
+      const cur = get().filmCat === id ? (next[0]?.id ?? 'c1') : get().filmCat;
+      patch({ filmCat: cur });
+      await loadProjects(cur);
+      task('已删除类型 ✓', 100);
+    } catch (e) { task('删除类型失败：' + String(e), 100); }
+  };
+
+  // ---------- 影片：工程库 CRUD ----------
+  const importFilm = async () => {
+    const cat = get().filmCat;
+    const list = get().filmProjects[cat] || [];
+    const title = '新素材 ' + (list.length + 1);
+    try {
+      const id = await createFilmProject(cat, title, null);
+      set((s) => {
+        const projects = {
+          ...s.filmProjects,
+          [cat]: [...(s.filmProjects[cat] || []), {
+            id, categoryId: cat, title, cover: null, status: '草稿', tags: '', createdAt: Date.now(),
+          } as FilmProject],
+        };
+        return {
+          ...s,
+          filmProjects: projects,
+          editingProj: { cat, id, t: title },
+          filmStage: 'editor',
+          editorSub: 'gen',
+          editorState: freshEditorState(id, title + '.mp4'),
+        };
+      });
+      task('已创建工程 ✓', 100);
+    } catch (e) {
+      task('创建工程失败：' + String(e), 100);
+    }
+  };
+
+  const openEditor = async (cat: string, id: string, t: string) => {
+    patch({ editingProj: { cat, id, t }, filmStage: 'editor', editorSub: 'gen', filmCat: cat });
+    try {
+      const row = await loadTimeline(id);
+      if (row) {
+        const env = JSON.parse(row.tracks) as TimelineEnvelope;
+        set((s) => ({ ...s, editorState: { ...s.editorState, projectId: id, timeline: env } }));
+      } else {
+        set((s) => ({ ...s, editorState: { ...s.editorState, projectId: id } }));
+      }
+    } catch {
+      set((s) => ({ ...s, editorState: { ...s.editorState, projectId: id } }));
+    }
+  };
+
+  const updateProject = async (id: string, p: { title?: string; cover?: string | null; status?: string; tags?: string }) => {
+    try {
+      await updateFilmProject(id, p);
+      await loadProjects(get().filmCat);
+    } catch (e) { task('更新工程失败：' + String(e), 100); }
+  };
+
+  const deleteProject = async (id: string) => {
+    try {
+      await deleteFilmProject(id);
+      if (get().editingProj?.id === id) patch({ filmStage: 'library', editingProj: null });
+      await loadProjects(get().editingProj?.cat ?? get().filmCat);
+      task('已删除工程 ✓', 100);
+    } catch (e) { task('删除工程失败：' + String(e), 100); }
+  };
+
   const goEditorSub = (id: string) => patch({ editorSub: id });
 
+  // ---------- 影片：解说文案 ----------
   const filmScriptMap: Record<string, string> = {
     '城市之光': '第一段，老街清晨，阳光洒在青石板上；第二段，转角面馆热气升腾；第三段，一碗面下肚，满足上扬；第四段，窗边静坐，写一段给城市的话。',
     '外婆的菜园': '第一段，晨雾里的菜畦；第二段，外婆弯腰摘豆；第三段，灶台烟火气；第四段，一碗时蔬汤，是童年的味。',
     '候鸟': '第一段，秋风起，翅影掠过湖面；第二段，南飞编队穿云；第三段，湿地歇脚；第四段，春归，生命轮回。',
   };
   const genFilmScript = () => {
-    const proj = initialState.editingProj;
-    const script = proj ? (filmScriptMap[proj.t] || '根据影片内容自动生成一段可二次编辑的解说文案……') : '根据影片内容自动生成一段可二次编辑的解说文案……';
-    sim('生成解说文案…', 1200, () => set((s) => ({ ...s, editorState: { ...s.editorState, script } })));
+    const title = get().editingProj?.t || '';
+    const script = filmScriptMap[title] || '根据影片内容自动生成一段可二次编辑的解说文案……';
+    task('生成解说文案…', 40);
+    window.setTimeout(() => {
+      set((s) => ({ ...s, editorState: { ...s.editorState, script } }));
+      task('生成解说文案 ✓', 100);
+      window.setTimeout(() => task('空闲', 0), 1200);
+    }, 1000);
   };
-  const alignFilm = () => sim('导入视频并对齐文案…', 1300, () =>
-    set((s) => ({ ...s, editorState: { ...s.editorState, imported: true, aligned: true, alignedPct: 100 } })));
 
+  // ---------- 影片：导入对齐（film_import 任务） ----------
+  const alignFilm = () => {
+    const proj = get().editingProj;
+    if (!proj) return;
+    const pid = proj.id;
+    const videoPath = get().editorState.videoPath;
+    const script = get().editorState.script;
+    task('导入并抽取音轨…', 10);
+    submitFilmImport(pid, videoPath, script, (m: ProgressMsg) => {
+      task(m.message || '导入对齐中…', m.progress);
+      if (m.status === 'done') {
+        const payload = (m.payload || {}) as { alignedPct?: number; degraded?: boolean };
+        loadTimeline(pid).then((row) => {
+          if (row) {
+            const env = JSON.parse(row.tracks) as TimelineEnvelope;
+            set((s) => ({
+              ...s,
+              editorState: {
+                ...s.editorState,
+                projectId: pid,
+                timeline: env,
+                imported: true,
+                aligned: true,
+                alignedPct: payload.alignedPct ?? 0,
+                asr: env.asr || [],
+              },
+            }));
+          } else {
+            set((s) => ({ ...s, editorState: { ...s.editorState, imported: true, aligned: true, alignedPct: payload.alignedPct ?? 0 } }));
+          }
+          task(payload.degraded ? '导入完成（ASR 降级）' : '导入对齐完成 ✓', 100);
+          window.setTimeout(() => task('空闲', 0), 1800);
+        }).catch(() => {
+          task('时间线载入失败', 100);
+        });
+      } else if (m.status === 'failed') {
+        task('导入失败：' + (m.message || '未知错误'), 100);
+      }
+    }).catch((e) => task('导入失败：' + String(e), 100));
+  };
+
+  // ---------- 影片：解说配音（本地预览；真实 TTS 混音在导出时执行） ----------
   const buildVoiceLines = (script: string) =>
-    script.split('\n').filter(Boolean).map((x, i) => ({ id: i, t: `0:0${i}`, x }));
+    script.split('\n').filter(Boolean).map((x, i) => ({ id: i, t: fmtSec(i * 4), x }));
 
-  const genVoiceForFilm = () => sim('智能配音 + 生成字幕…', 1300, () =>
-    set((s) => ({ ...s, editorState: { ...s.editorState, voiceLines: buildVoiceLines(s.editorState.script), aligned: true } })));
+  const genVoiceForFilm = () => {
+    const script = get().editorState.script;
+    const lines = buildVoiceLines(script);
+    task('智能配音 + 生成字幕…', 40);
+    window.setTimeout(() => {
+      set((s) => ({ ...s, editorState: { ...s.editorState, voiceLines: lines, aligned: true } }));
+      task('配音生成 ✓', 100);
+      window.setTimeout(() => task('空闲', 0), 1200);
+    }, 1000);
+  };
   const reVoiceForFilm = () => genVoiceForFilm();
   const editVoiceLine = (i: number, v: string) => set((s) => ({
     ...s, editorState: { ...s.editorState, voiceLines: (s.editorState.voiceLines || []).map((l) => l.id === i ? { ...l, x: v } : l) },
   }));
   const setVoiceMix = (v: number) => set((s) => ({ ...s, editorState: { ...s.editorState, voiceMix: v } }));
-  const previewMix = () => task('预览混音（原声 ' + Math.round(initialState.editorState.voiceMix * 100) + '%）', 60);
+  const previewMix = () => task('预览混音（原声 ' + Math.round(get().editorState.voiceMix * 100) + '%）', 60);
 
+  // ---------- 影片：智能粗剪（film_smart_cut 任务） ----------
   const autoCut = () => {
-    const lines = initialState.editorState.script.split('\n').filter(Boolean);
-    const cuts = lines.map((tx, i) => ({ t1: `0:0${i}`, t2: `0:1${i}`, tx, dur: 6, kept: true }));
-    sim('自动切点…', 1200, () => set((s) => ({ ...s, editorState: { ...s.editorState, cuts } })));
+    const proj = get().editingProj;
+    if (!proj) return;
+    const pid = proj.id;
+    const script = get().editorState.script;
+    task('载入时间线并切点…', 10);
+    submitFilmSmartCut(pid, script, (m: ProgressMsg) => {
+      task(m.message || '自动切点中…', m.progress);
+      if (m.status === 'done') {
+        loadTimeline(pid).then((row) => {
+          if (row) {
+            const env = JSON.parse(row.tracks) as TimelineEnvelope;
+            set((s) => ({ ...s, editorState: { ...s.editorState, projectId: pid, timeline: env } }));
+          }
+          task('自动切点完成 ✓', 100);
+          window.setTimeout(() => task('空闲', 0), 1500);
+        }).catch(() => task('时间线载入失败', 100));
+      } else if (m.status === 'failed') {
+        task('切点失败：' + (m.message || '未知错误'), 100);
+      }
+    }).catch((e) => task('切点失败：' + String(e), 100));
   };
-  const archiveToFilm = () => sim('归档到影片库…', 900, () => patch({ filmStage: 'library' }));
+
+  // ---------- 影片：时间线保存 / 归档 ----------
+  const saveTimeline = async () => {
+    const proj = get().editingProj;
+    const env = get().editorState.timeline;
+    if (!proj || !env) return;
+    try {
+      await persistTimeline(proj.id, env, flattenClips(env));
+      task('时间线已保存 ✓', 100);
+    } catch (e) {
+      task('保存时间线失败：' + String(e), 100);
+    }
+  };
+
+  const archiveToFilm = async () => {
+    await saveTimeline();
+    const cat = get().editingProj?.cat ?? get().filmCat;
+    patch({ filmStage: 'library' });
+    await loadProjects(cat);
+  };
+
+  // ---------- 影片：花字选择（与口播共用 editorState.flower） ----------
+  const pickFlower = (id: string) => set((s) => ({ ...s, editorState: { ...s.editorState, flower: id } }));
+
+  // ---------- 影片：导出（film_export 任务） ----------
+  const setExportOpt = (p: Partial<EditorStateType['exportOpts']>) =>
+    set((s) => ({ ...s, editorState: { ...s.editorState, exportOpts: { ...s.editorState.exportOpts, ...p } } }));
+
+  const exportFilm = () => {
+    const proj = get().editingProj;
+    if (!proj) return;
+    const opts = get().editorState.exportOpts;
+    task('准备导出…', 5);
+    submitFilmExport(proj.id, { ...opts, script: get().editorState.script }, (m: ProgressMsg) => {
+      task(m.message || '导出中…', m.progress);
+      if (m.status === 'done') {
+        task('导出 MP4 完成 ✓', 100);
+        window.setTimeout(() => task('空闲', 0), 1800);
+      } else if (m.status === 'failed') {
+        task('导出失败：' + (m.message || '未知错误'), 100);
+      }
+    }).catch((e) => task('导出失败：' + String(e), 100));
+  };
 
   // ---------- 口播 ----------
   const uploadSpoken = () => set((s) => {
@@ -125,7 +409,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void) {
     } : v),
   }));
   const uploadAsset = (id: string) => {
-    const v = initialState.spokenVideos.find((x) => x.id === id);
+    const v = get().spokenVideos.find((x) => x.id === id);
     const types: ('image' | 'bgm' | 'sfx' | 'clip')[] = ['image', 'bgm', 'sfx', 'clip'];
     set((s) => ({
       ...s, spokenVideos: s.spokenVideos.map((x) => {
@@ -307,8 +591,11 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void) {
   return {
     set: patch, task,
     goModule, goSettingsSub,
-    importFilm, openEditor, goEditorSub, genFilmScript, alignFilm,
-    genVoiceForFilm, reVoiceForFilm, editVoiceLine, setVoiceMix, previewMix, autoCut, archiveToFilm,
+    initFilm, loadProjects, switchCat,
+    createCat, renameCat, reorderCat, moveCat, deleteCat,
+    importFilm, openEditor, updateProject, deleteProject, goEditorSub, genFilmScript, alignFilm,
+    genVoiceForFilm, reVoiceForFilm, editVoiceLine, setVoiceMix, previewMix, autoCut,
+    saveTimeline, archiveToFilm, pickFlower, setExportOpt, exportFilm,
     uploadSpoken, transcribe, setIssue, acceptAllIssues, ignoreAllIssues, cleanFromAccepted,
     uploadAsset, delAsset, doMatch, toggleMatch, applyAllMatch,
     pickSpokenFlower, burnFlower, exportSpoken, exportSpokenJianYing,
@@ -322,11 +609,20 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void) {
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<AppState>(initialState);
+  const stateRef = useRef<AppState>(state);
+  stateRef.current = state;
   const taskTimer = useRef<number | undefined>(undefined);
   const task = (label: string, p?: number) => {
     setState((s) => ({ ...s, task: { label, p: p ?? s.task.p } }));
     if (label === '空闲' && taskTimer.current) window.clearTimeout(taskTimer.current);
   };
-  const actions = buildActions(setState, task);
+  const actions = buildActions(setState, task, () => stateRef.current);
+
+  // 启动即拉取类型树与工程库（真实或 mock 回退）
+  useEffect(() => {
+    actions.initFilm();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return <Ctx.Provider value={{ state, set: setState, task, actions }}>{children}</Ctx.Provider>;
 }

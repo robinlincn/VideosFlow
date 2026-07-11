@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -63,6 +63,37 @@ class TtsRequest(BaseModel):
     text: str
     model: Optional[str] = None
     voice: str = "default"
+
+
+class AsrRequest(BaseModel):
+    """语音识别请求：传音频绝对路径（避免大文件 base64）。"""
+
+    audio_path: str
+    language: str = "zh"
+
+
+class AsrSegment(BaseModel):
+    """单句识别结果。"""
+
+    start: float
+    end: float
+    text: str
+    confidence: float = 1.0
+
+
+class AsrResponse(BaseModel):
+    """语音识别整体结果（对齐 §3.4 Envelope.data）。"""
+
+    segments: List[AsrSegment]
+    language: str = "zh"
+    duration: float = 0.0
+
+
+class TtsResponse(BaseModel):
+    """语音合成结果（返回音频文件绝对路径）。"""
+
+    audio_path: str
+    duration: float = 0.0
 
 
 # 能力维度

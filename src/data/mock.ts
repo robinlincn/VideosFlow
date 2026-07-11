@@ -1,22 +1,44 @@
 // VideosFlow — 全局类型与初始 mock 数据
 // 数据形态与交互流程对齐 preview/prototype.html，供 React 端状态初始化使用。
+// M2：FilmCategory / FilmProject / EditorState 对齐 DB 真实结构；flowerTpls 扩为 6 套 ASS 模板。
+
+import type {
+  FilmCategory,
+  FilmProject,
+  AsrSegment,
+  TimelineEnvelope,
+  FlowerTemplate,
+  FilmExportOptions,
+} from '../ipc/types';
 
 export type ModuleKey = 'film' | 'spoken' | 'creation' | 'settings';
 
-export interface FilmCat { id: string; name: string; n: number; }
-export interface FilmProject { t: string; s: string; }
+export interface FilmCat extends FilmCategory {}
+
+export interface FilmProjectRow extends FilmProject {}
+
+// 花字模板（保留 Spoken 模块使用的 cls/demo/desc 字段，并新增 kind/assStyle 供 Film 使用）
+export interface FlowerTpl extends FlowerTemplate {
+  cls: string;
+  demo: string;
+  desc: string;
+}
 
 export interface EditorState {
+  projectId: string | null;
   videoName: string;
-  imported: boolean;
+  videoPath: string;
   script: string;
+  imported: boolean;
   aligned: boolean;
   alignedPct: number;
-  cuts: { t1: string; t2: string; tx: string; dur: number; kept: boolean }[] | null;
-  clips: { id: string; track: string; start: number; end: number; label: string }[] | null;
-  flower: string;
-  voiceLines: { id: number; t: string; x: string }[] | null;
+  asr: AsrSegment[];
+  timeline: TimelineEnvelope | null;
   voiceMix: number; // 原片原声占比 0-1
+  flower: string;
+  selectedClipId: string | null;
+  exportOpts: FilmExportOptions;
+  voiceLines: { id: number; t: string; x: string }[] | null;
 }
 
 export interface SpokenIssue {
@@ -71,13 +93,20 @@ export interface SettingsState {
   };
 }
 
-export const flowerTpls = [
-  { id: 'emphasis', name: '重点强调', desc: '黄底加粗', cls: 'emphasis', demo: '关键词' },
-  { id: 'emotion', name: '情绪渲染', desc: '粉紫渐变', cls: 'emotion', demo: '感慨一下' },
-  { id: 'shout', name: '强烈感叹', desc: '红色大字', cls: 'shout', demo: '注意！' },
-  { id: 'keyword', name: '关键词描边', desc: '白底边框', cls: 'keyword', demo: '新产品' },
-  { id: 'underline', name: '重点下划线', desc: '蓝色加下划线', cls: 'underline', demo: '核心点' },
-  { id: 'shake', name: '警示抖动', desc: '红色虚框', cls: 'shake', demo: '别忘了' },
+// 6 套花字模板（固化内置，M2 不支持用户自定义；与 Rust ffmpeg.rs FLOWER_STYLES 对齐）
+export const flowerTpls: FlowerTpl[] = [
+  { id: 'emphasis', name: '重点强调', kind: 'emphasis', cls: 'emphasis', demo: '关键词', desc: '黄底加粗',
+    assStyle: { Name: 'Emphasis', FontName: 'Noto Sans CJK SC', FontSize: 30, PrimaryColour: '&H00FFFFFF', BackColour: '&H0042C8F5', Outline: 0, Shadow: 0, Bold: 1, BorderStyle: 3, Alignment: 2, MarginV: 40, MarginL: 30 } },
+  { id: 'emotion', name: '情绪渲染', kind: 'emotion', cls: 'emotion', demo: '感慨一下', desc: '粉紫渐变',
+    assStyle: { Name: 'Emotion', FontName: 'Noto Sans CJK SC', FontSize: 30, PrimaryColour: '&H00B0A0FF', BackColour: '&H00000000', Outline: 3, Shadow: 1, Bold: 0, BorderStyle: 1, Alignment: 2, MarginV: 40, MarginL: 30 } },
+  { id: 'shout', name: '强烈感叹', kind: 'shout', cls: 'shout', demo: '注意！', desc: '红色大字',
+    assStyle: { Name: 'Shout', FontName: 'Noto Sans CJK SC', FontSize: 40, PrimaryColour: '&H003838F0', BackColour: '&H00000000', Outline: 3, Shadow: 2, Bold: 1, BorderStyle: 1, Alignment: 2, MarginV: 60, MarginL: 30 } },
+  { id: 'keyword', name: '关键词描边', kind: 'keyword', cls: 'keyword', demo: '新产品', desc: '白底边框',
+    assStyle: { Name: 'Keyword', FontName: 'Noto Sans CJK SC', FontSize: 30, PrimaryColour: '&H00FFFFFF', BackColour: '&H00000000', Outline: 3, Shadow: 0, Bold: 0, BorderStyle: 1, Alignment: 2, MarginV: 40, MarginL: 30 } },
+  { id: 'title', name: '居中标题', kind: 'title', cls: 'title', demo: '本集主题', desc: '居中大字',
+    assStyle: { Name: 'Title', FontName: 'Noto Sans CJK SC', FontSize: 38, PrimaryColour: '&H00FFFFFF', BackColour: '&H00000000', Outline: 2, Shadow: 1, Bold: 1, BorderStyle: 1, Alignment: 5, MarginV: 80, MarginL: 0 } },
+  { id: 'signature', name: '左下角署名', kind: 'signature', cls: 'signature', demo: '@作者', desc: '小字左下',
+    assStyle: { Name: 'Signature', FontName: 'Noto Sans CJK SC', FontSize: 20, PrimaryColour: '&H00D0D0D0', BackColour: '&H00000000', Outline: 1, Shadow: 0, Bold: 0, BorderStyle: 1, Alignment: 1, MarginV: 20, MarginL: 20 } },
 ];
 
 export const stylePresets: Record<string, { tone: string; font: string; cam: string }> = {
@@ -125,27 +154,55 @@ export const settingsSteps = [
   { id: 'other', name: '其他参数' },
 ];
 
-export const initialFilmCats: FilmCat[] = [
-  { id: 'c1', name: '电影', n: 3 }, { id: 'c2', name: '故事', n: 2 },
-  { id: 'c3', name: '电视剧', n: 1 }, { id: 'c4', name: '动画片', n: 4 },
-  { id: 'c5', name: '记录片', n: 2 },
+export const initialFilmCats: FilmCategory[] = [
+  { id: 'c1', name: '电影', order: 1, editable: 1 },
+  { id: 'c2', name: '故事', order: 2, editable: 1 },
+  { id: 'c3', name: '电视剧', order: 3, editable: 1 },
+  { id: 'c4', name: '动画片', order: 4, editable: 1 },
+  { id: 'c5', name: '记录片', order: 5, editable: 1 },
 ];
 
 export const initialFilmProjects: Record<string, FilmProject[]> = {
-  c1: [{ t: '城市之光', s: '已发布' }, { t: '归途', s: '草稿' }, { t: '暗涌', s: '草稿' }],
-  c2: [{ t: '外婆的菜园', s: '已发布' }, { t: '雨夜书店', s: '草稿' }],
-  c3: [{ t: '长河', s: '制作中' }],
-  c4: [{ t: '喵星日记', s: '已发布' }, { t: '齿轮王国', s: '已发布' }, { t: '云朵工厂', s: '草稿' }, { t: '小灯塔', s: '已发布' }],
-  c5: [{ t: '候鸟', s: '已发布' }, { t: '匠心', s: '制作中' }],
+  c1: [
+    { id: 'p-c1-1', categoryId: 'c1', title: '城市之光', cover: null, status: '已发布', tags: '', createdAt: 1 },
+    { id: 'p-c1-2', categoryId: 'c1', title: '归途', cover: null, status: '草稿', tags: '', createdAt: 2 },
+    { id: 'p-c1-3', categoryId: 'c1', title: '暗涌', cover: null, status: '草稿', tags: '', createdAt: 3 },
+  ],
+  c2: [
+    { id: 'p-c2-1', categoryId: 'c2', title: '外婆的菜园', cover: null, status: '已发布', tags: '', createdAt: 4 },
+    { id: 'p-c2-2', categoryId: 'c2', title: '雨夜书店', cover: null, status: '草稿', tags: '', createdAt: 5 },
+  ],
+  c3: [
+    { id: 'p-c3-1', categoryId: 'c3', title: '长河', cover: null, status: '制作中', tags: '', createdAt: 6 },
+  ],
+  c4: [
+    { id: 'p-c4-1', categoryId: 'c4', title: '喵星日记', cover: null, status: '已发布', tags: '', createdAt: 7 },
+    { id: 'p-c4-2', categoryId: 'c4', title: '齿轮王国', cover: null, status: '已发布', tags: '', createdAt: 8 },
+    { id: 'p-c4-3', categoryId: 'c4', title: '云朵工厂', cover: null, status: '草稿', tags: '', createdAt: 9 },
+    { id: 'p-c4-4', categoryId: 'c4', title: '小灯塔', cover: null, status: '已发布', tags: '', createdAt: 10 },
+  ],
+  c5: [
+    { id: 'p-c5-1', categoryId: 'c5', title: '候鸟', cover: null, status: '已发布', tags: '', createdAt: 11 },
+    { id: 'p-c5-2', categoryId: 'c5', title: '匠心', cover: null, status: '制作中', tags: '', createdAt: 12 },
+  ],
 };
 
 export const initialEditorState: EditorState = {
+  projectId: null,
   videoName: '旅行 vlog 原始素材.mp4',
-  imported: false,
+  videoPath: '',
   script:
     '第一段，开场我走在这条老街上，阳光打在青石板上。\n第二段，转角有家老店，老板正在煮面，热气腾腾。\n第三段，我点了一碗面，尝一口，嘴角上扬。\n第四段，结尾我坐在窗边，看着行人，写一段话。',
-  aligned: false, alignedPct: 0,
-  cuts: null, clips: null, flower: 'emphasis', voiceLines: null, voiceMix: 0.15,
+  imported: false,
+  aligned: false,
+  alignedPct: 0,
+  asr: [],
+  timeline: null,
+  voiceMix: 0.15,
+  flower: 'emphasis',
+  selectedClipId: null,
+  exportOpts: { hw: true, resolution: '1920x1080', burnSub: true, mixVoice: false, voiceMix: 0.15, script: '' },
+  voiceLines: null,
 };
 
 export const initialSpokenVideos: SpokenVideo[] = [
@@ -224,9 +281,9 @@ export interface AppState {
   filmCat: string;
   filmStage: 'library' | 'editor';
   editorSub: string;
-  editingProj: { cat: string; t: string } | null;
+  editingProj: { cat: string; id: string; t: string } | null;
   selectedClip: string | null;
-  filmCats: FilmCat[];
+  filmCats: FilmCategory[];
   filmProjects: Record<string, FilmProject[]>;
   editorState: EditorState;
   spokenSel: string | null;

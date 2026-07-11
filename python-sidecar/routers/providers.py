@@ -12,6 +12,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from models import (
+    AsrRequest,
     ChatRequest,
     Envelope,
     ImageRequest,
@@ -42,6 +43,11 @@ class VideoCall(BaseModel):
 class TtsCall(BaseModel):
     cfg: ProviderCfg
     req: TtsRequest
+
+
+class AsrCall(BaseModel):
+    cfg: ProviderCfg
+    req: AsrRequest
 
 
 class TestCall(BaseModel):
@@ -80,6 +86,16 @@ async def tts(call: TtsCall) -> Envelope:
     p = build_provider(call.cfg)
     try:
         return await p.tts(call.req)
+    finally:
+        await p.close()
+
+
+@router.post("/asr", response_model=Envelope)
+async def asr(call: AsrCall) -> Envelope:
+    """语音识别（M2 新增）。默认占位端点，返回清晰降级信封；真实转发由 VF_ASR_REAL=1 开启。"""
+    p = build_provider(call.cfg)
+    try:
+        return await p.asr(call.req)
     finally:
         await p.close()
 

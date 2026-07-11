@@ -1,5 +1,6 @@
 // VideosFlow — Python sidecar 启动/守护/健康检查 + HTTP 信封
 // M0 仅做 best-effort 启动与连通性，崩溃不阻塞主程序（独立进程，崩了可重启）。
+// M2：新增 call_asr / call_tts 转发 /v1/asr、/v1/tts。
 
 use std::path::Path;
 use std::process::{Child, Command};
@@ -200,7 +201,6 @@ pub async fn call_endpoint(
 }
 
 /// 真实对话：POST /v1/chat { cfg, req:{prompt, max_tokens} }。
-/// 用于连接测试与链路验证（打通 Rust→sidecar→Agnes 全链路）。
 pub async fn call_chat(
     client: &reqwest::Client,
     port: u16,
@@ -210,6 +210,30 @@ pub async fn call_chat(
 ) -> Result<Envelope, String> {
     let req = serde_json::json!({ "prompt": prompt, "max_tokens": max_tokens });
     call_endpoint(client, port, "chat", cfg, req).await
+}
+
+/// M2：语音识别：POST /v1/asr { cfg, req:{audioPath, language} }。
+pub async fn call_asr(
+    client: &reqwest::Client,
+    port: u16,
+    cfg: &ProviderCfg,
+    audio_path: &str,
+    language: &str,
+) -> Result<Envelope, String> {
+    let req = serde_json::json!({ "audioPath": audio_path, "language": language });
+    call_endpoint(client, port, "asr", cfg, req).await
+}
+
+/// M2：语音合成：POST /v1/tts { cfg, req:{text, voice} }。返回 data.audioPath。
+pub async fn call_tts(
+    client: &reqwest::Client,
+    port: u16,
+    cfg: &ProviderCfg,
+    text: &str,
+    voice: &str,
+) -> Result<Envelope, String> {
+    let req = serde_json::json!({ "text": text, "voice": voice });
+    call_endpoint(client, port, "tts", cfg, req).await
 }
 
 /// 由 DB 行 + 凭据库 key 组装完整 ProviderCfg（供连接测试转发）。
