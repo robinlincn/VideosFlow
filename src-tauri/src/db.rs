@@ -178,6 +178,38 @@ pub async fn init(pool: &SqlitePool) -> Result<(), String> {
             .map_err(|e| format!("建表失败: {e}"))?;
     }
     seed_defaults(pool).await?;
+    seed_film_categories(pool).await?;
+    Ok(())
+}
+
+/// 首次运行填充默认影片分类（与前端 initialFilmCats 对齐：电影/故事/电视剧/动画片/记录片）。
+/// 仅当 film_categories 为空时插入，已存在则跳过（用户已自定义的分类不覆盖）。
+async fn seed_film_categories(pool: &SqlitePool) -> Result<(), String> {
+    let cnt: i64 = sqlx::query("SELECT COUNT(*) AS c FROM film_categories")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .try_get("c")
+        .map_err(|e| e.to_string())?;
+    if cnt > 0 {
+        return Ok(());
+    }
+    let defaults: &[(&str, &str, i64)] = &[
+        ("c1", "电影", 1),
+        ("c2", "故事", 2),
+        ("c3", "电视剧", 3),
+        ("c4", "动画片", 4),
+        ("c5", "记录片", 5),
+    ];
+    for (id, name, order) in defaults {
+        sqlx::query("INSERT INTO film_categories(id, name, \"order\", editable) VALUES(?, ?, ?, 1)")
+            .bind(id)
+            .bind(name)
+            .bind(order)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
