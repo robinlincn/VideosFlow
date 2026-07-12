@@ -156,7 +156,7 @@ function ApiView() {
       <div className="pcard" style={{ marginTop: 14 }}>
         <div className="ph"><span className="dot" /><b>链路验证 · 真实 Agnes /v1/chat</b>
           <span className="tag key" style={{ marginLeft: 'auto' }}>全链路</span></div>
-        <div className="muted sm" style={{ marginBottom: 8 }}>填好 LLM 的 API Key 并「保存全部配置」后，点击下方按钮会经「Rust 命令 → Python sidecar → Agnes /chat/completions」真实调用一次对话，回答经进度通道回传。用于验证 M1 全链路打通。</div>
+        <div className="muted sm" style={{ marginBottom: 8 }}>填好 LLM 的 API Key 并「保存全部配置」后，点击下方按钮会经「Rust 命令 → reqwest 直连 Agnes /chat/completions」真实调用一次对话，回答经进度通道回传。用于验证 M1 全链路打通（不依赖 Python sidecar）。</div>
         <div className="field"><label>测试提示词</label>
           <textarea rows={2} value={chatPrompt} onChange={(e) => setChatPrompt(e.target.value)} />
         </div>

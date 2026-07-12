@@ -65,39 +65,52 @@ async fn run_job(pool: &SqlitePool, client: &Client, port: u16, data_dir: &Path,
     });
     db::task_update(pool, &job.id, "running", 10.0, "引擎健康检查").await.ok();
 
-    // sidecar 连通性
-    let alive = python::health(client, port).await;
-    if !alive {
-        db::task_update(
-            pool,
-            &job.id,
-            "failed",
-            30.0,
-            "Python sidecar 未运行（请先启动 python-sidecar，或检查 VF_PYTHON/VF_SIDECAR_DIR）",
-        )
-        .await
-        .ok();
+    // 仅依赖 Python sidecar 的任务（影片 ASR/TTS）需先做连通性检查；
+    // 纯云 LLM 对话（chat）经 Rust reqwest 直连 Agnes，不依赖 sidecar（与 provider_test 一致）。
+    let needs_sidecar = matches!(
+        job.kind.as_str(),
+        "film_import" | "film_smart_cut" | "film_export"
+    );
+    if needs_sidecar {
+        let alive = python::health(client, port).await;
+        if !alive {
+            db::task_update(
+                pool,
+                &job.id,
+                "failed",
+                30.0,
+                "Python sidecar 未运行（影片 ASR/TTS 需要 sidecar；请检查 VF_PYTHON/VF_SIDECAR_DIR）",
+            )
+            .await
+            .ok();
+            emit(ProgressMsg {
+                task_id: job.id.clone(),
+                progress: 100.0,
+                status: "failed".into(),
+                message: Some("sidecar 未运行".into()),
+                payload: None,
+            });
+            return;
+        }
         emit(ProgressMsg {
             task_id: job.id.clone(),
-            progress: 100.0,
-            status: "failed".into(),
-            message: Some("sidecar 未运行".into()),
+            progress: 60.0,
+            status: "running".into(),
+            message: Some("AI 引擎可达".into()),
             payload: None,
         });
-        return;
+        db::task_update(pool, &job.id, "running", 60.0, "AI 引擎可达").await.ok();
     }
-
-    emit(ProgressMsg {
-        task_id: job.id.clone(),
-        progress: 60.0,
-        status: "running".into(),
-        message: Some("AI 引擎可达".into()),
-        payload: None,
-    });
-    db::task_update(pool, &job.id, "running", 60.0, "AI 引擎可达").await.ok();
 
     match job.kind.as_str() {
         "chat" | "llm_chat" => {
+            emit(ProgressMsg {
+                task_id: job.id.clone(),
+                progress: 60.0,
+                status: "running".into(),
+                message: Some("正在调用 Agnes /chat/completions".into()),
+                payload: None,
+            });
             match run_chat(pool, client, port, &job).await {
                 Ok(answer) => {
                     db::task_update(pool, &job.id, "done", 100.0, "完成（真实 Agnes 对话）")
@@ -215,11 +228,15 @@ async fn run_job(pool: &SqlitePool, client: &Client, port: u16, data_dir: &Path,
     });
 }
 
-/// 真实对话任务：取 llm provider 配置 + 系统凭据库 Key，经 sidecar /v1/chat 调用 Agnes。
-async fn run_chat(pool: &SqlitePool, client: &Client, port: u16, job: &TaskJob) -> Result<String, String> {
+/// 真实对话任务：取 llm provider 配置 + 系统凭据库 Key，经 Rust reqwest 直连 Agnes /chat/completions（OpenAI 兼容）。
+/// 不依赖 Python sidecar（MVP 纯云 API，与 provider_test 同一思路）。
+async fn run_chat(pool: &SqlitePool, client: &Client, _port: u16, job: &TaskJob) -> Result<String, String> {
     let row = db::get_by_kind(pool, "llm").await?;
     let key = cred::get_key("llm")?;
-    let cfg = python::build_cfg(&row, key);
+    let key = key.ok_or_else(|| "尚未保存 LLM（Agnes）API Key，请先在设置页保存 Key".to_string())?;
+    if row.base_url.is_empty() {
+        return Err("LLM 网关 base_url 未配置（请检查设置页 Agnes base_url）".into());
+    }
     let prompt = job
         .payload
         .get("prompt")
@@ -233,12 +250,36 @@ async fn run_chat(pool: &SqlitePool, client: &Client, port: u16, job: &TaskJob) 
         .or_else(|| job.payload.get("max_tokens").and_then(|v| v.as_i64()))
         .unwrap_or(512)
         .clamp(1, 4096) as u32;
-    let env = python::call_chat(client, port, &cfg, &prompt, max_tokens).await?;
-    if env.ok {
-        Ok(extract_chat_text(&env.data))
-    } else {
-        Err(env.message)
+
+    let base = row.base_url.trim_end_matches('/');
+    let url = format!("{base}/chat/completions");
+    let body = serde_json::json!({
+        "model": row.model,
+        "messages": [ { "role": "user", "content": prompt } ],
+        "max_tokens": max_tokens,
+    });
+    let resp = client
+        .post(&url)
+        .bearer_auth(&key)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| format!("请求 Agnes 失败: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let txt = resp.text().await.unwrap_or_default();
+        return Err(format!("Agnes 返回 {status}: {txt}"));
     }
+    let data: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析 Agnes 响应失败: {e}"))?;
+    if data.get("choices").is_none() {
+        // 兜底：返回原始 JSON，便于排查 Agnes 非常规响应
+        return Ok(serde_json::to_string_pretty(&data).unwrap_or_default());
+    }
+    Ok(extract_chat_text(&Some(data)))
 }
 
 /// 从 OpenAI 兼容响应中提取对话文本（choices[0].message.content），兜底返回原始 data。
