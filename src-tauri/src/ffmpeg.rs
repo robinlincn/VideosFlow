@@ -172,11 +172,11 @@ pub fn parse_silence(s: &str) -> Vec<(f64, f64)> {
 // ---------------------------------------------------------------------------
 
 pub struct AssStyle {
-    pub name: String,
-    pub font_name: String,
+    pub name: &'static str,
+    pub font_name: &'static str,
     pub font_size: i32,
-    pub primary_colour: String,
-    pub back_colour: String,
+    pub primary_colour: &'static str,
+    pub back_colour: &'static str,
     pub outline: i32,
     pub shadow: i32,
     pub bold: i32,
@@ -198,11 +198,11 @@ pub fn flower_style(id: &str) -> &'static AssStyle {
 pub const FLOWER_STYLES: &[AssStyle] = &[
     // emphasis 重点强调：黄底加粗
     AssStyle {
-        name: "Emphasis".into(),
-        font_name: "Noto Sans CJK SC".into(),
+        name: "Emphasis",
+        font_name: "Noto Sans CJK SC",
         font_size: 30,
-        primary_colour: "&H00FFFFFF".into(),
-        back_colour: "&H0042C8F5".into(),
+        primary_colour: "&H00FFFFFF",
+        back_colour: "&H0042C8F5",
         outline: 0,
         shadow: 0,
         bold: 1,
@@ -213,11 +213,11 @@ pub const FLOWER_STYLES: &[AssStyle] = &[
     },
     // emotion 情绪渲染：粉紫渐变（以亮紫描边近似）
     AssStyle {
-        name: "Emotion".into(),
-        font_name: "Noto Sans CJK SC".into(),
+        name: "Emotion",
+        font_name: "Noto Sans CJK SC",
         font_size: 30,
-        primary_colour: "&H00B0A0FF".into(),
-        back_colour: "&H00000000".into(),
+        primary_colour: "&H00B0A0FF",
+        back_colour: "&H00000000",
         outline: 3,
         shadow: 1,
         bold: 0,
@@ -228,11 +228,11 @@ pub const FLOWER_STYLES: &[AssStyle] = &[
     },
     // shout 强烈感叹：红字大字
     AssStyle {
-        name: "Shout".into(),
-        font_name: "Noto Sans CJK SC".into(),
+        name: "Shout",
+        font_name: "Noto Sans CJK SC",
         font_size: 40,
-        primary_colour: "&H003838F0".into(),
-        back_colour: "&H00000000".into(),
+        primary_colour: "&H003838F0",
+        back_colour: "&H00000000",
         outline: 3,
         shadow: 2,
         bold: 1,
@@ -243,11 +243,11 @@ pub const FLOWER_STYLES: &[AssStyle] = &[
     },
     // keyword 关键词描边：白底边框
     AssStyle {
-        name: "Keyword".into(),
-        font_name: "Noto Sans CJK SC".into(),
+        name: "Keyword",
+        font_name: "Noto Sans CJK SC",
         font_size: 30,
-        primary_colour: "&H00FFFFFF".into(),
-        back_colour: "&H00000000".into(),
+        primary_colour: "&H00FFFFFF",
+        back_colour: "&H00000000",
         outline: 3,
         shadow: 0,
         bold: 0,
@@ -258,11 +258,11 @@ pub const FLOWER_STYLES: &[AssStyle] = &[
     },
     // title 居中标题：居中大字
     AssStyle {
-        name: "Title".into(),
-        font_name: "Noto Sans CJK SC".into(),
+        name: "Title",
+        font_name: "Noto Sans CJK SC",
         font_size: 38,
-        primary_colour: "&H00FFFFFF".into(),
-        back_colour: "&H00000000".into(),
+        primary_colour: "&H00FFFFFF",
+        back_colour: "&H00000000",
         outline: 2,
         shadow: 1,
         bold: 1,
@@ -273,11 +273,11 @@ pub const FLOWER_STYLES: &[AssStyle] = &[
     },
     // signature 左下角署名：小字左下
     AssStyle {
-        name: "Signature".into(),
-        font_name: "Noto Sans CJK SC".into(),
+        name: "Signature",
+        font_name: "Noto Sans CJK SC",
         font_size: 20,
-        primary_colour: "&H00D0D0D0".into(),
-        back_colour: "&H00000000".into(),
+        primary_colour: "&H00D0D0D0",
+        back_colour: "&H00000000",
         outline: 1,
         shadow: 0,
         bold: 0,
@@ -306,20 +306,20 @@ pub fn build_ass(tracks: &[db::TimelineTrack], win_start: f64, win_end: f64) -> 
     );
     for s in FLOWER_STYLES {
         styles.push_str(&format!(
-            "\nStyle: {},{},{},{},{},{},{},{},{},{},0,0,100,100,0,0,1,{},{},{},{},0",
+            "\nStyle: {},{},{},{},&H00000000,{},{},{},0,0,0,100,100,0,0,{},{},{},{},{},20,{},1",
             s.name,
             s.font_name,
             s.font_size,
             s.primary_colour,
             s.back_colour,
             s.back_colour,
-            s.outline,
-            s.shadow,
             s.bold,
             s.border_style,
+            s.outline,
+            s.shadow,
             s.alignment,
-            s.margin_v,
-            s.margin_l
+            s.margin_l,
+            s.margin_v
         ));
     }
 
@@ -337,7 +337,7 @@ pub fn build_ass(tracks: &[db::TimelineTrack], win_start: f64, win_end: f64) -> 
             let style = if c.flower.is_empty() {
                 "Default"
             } else {
-                flower_style(&c.flower).name.as_str()
+                flower_style(&c.flower).name
             };
             let text = c
                 .text

@@ -84,27 +84,22 @@ pub async fn provider_test(state: State<'_, AppState>, kind: String) -> Result<S
     }
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TaskSubmit {
-    pub kind: String,
-    #[serde(default)]
-    pub project_id: Option<String>,
-    #[serde(default)]
-    pub payload: serde_json::Value,
-    pub on_progress: Channel<ProgressMsg>,
-}
-
-#[tauri::command]
-pub async fn task_submit(state: State<'_, AppState>, req: TaskSubmit) -> Result<String, String> {
+#[tauri::command(rename_all = "camelCase")]
+pub async fn task_submit(
+    state: State<'_, AppState>,
+    kind: String,
+    project_id: Option<String>,
+    payload: serde_json::Value,
+    on_progress: Channel<ProgressMsg>,
+) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
-    db::task_create(&state.pool, &id, &req.kind, req.project_id.as_deref()).await?;
+    db::task_create(&state.pool, &id, &kind, project_id.as_deref()).await?;
     let job = TaskJob {
         id: id.clone(),
-        kind: req.kind,
-        project_id: req.project_id,
-        payload: req.payload,
-        channel: req.on_progress,
+        kind,
+        project_id,
+        payload,
+        channel: on_progress,
     };
     state.task_tx.send(job).await.map_err(|e| e.to_string())?;
     Ok(id)
@@ -136,7 +131,7 @@ pub async fn film_category_rename(state: State<'_, AppState>, id: String, name: 
 
 #[tauri::command]
 pub async fn film_category_reorder(state: State<'_, AppState>, id: String, order: i64) -> Result<(), String> {
-    db::film_category_reorder(&state.pool, &id, &order).await
+    db::film_category_reorder(&state.pool, &id, order).await
 }
 
 #[derive(Deserialize)]
@@ -235,97 +230,82 @@ pub async fn film_timeline_save(state: State<'_, AppState>, req: FilmTimelineSav
 // M2：异步任务命令（内部提交 film_* 任务，返回任务 id）
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FilmImportReq {
-    pub project_id: String,
-    pub video_path: String,
-    pub script: String,
-    pub on_progress: Channel<ProgressMsg>,
-}
-
-#[tauri::command]
-pub async fn film_import(state: State<'_, AppState>, req: FilmImportReq) -> Result<String, String> {
+#[tauri::command(rename_all = "camelCase")]
+pub async fn film_import(
+    state: State<'_, AppState>,
+    project_id: String,
+    video_path: String,
+    script: String,
+    on_progress: Channel<ProgressMsg>,
+) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
-    db::task_create(&state.pool, &id, "film_import", Some(&req.project_id)).await?;
+    db::task_create(&state.pool, &id, "film_import", Some(&project_id)).await?;
     let job = TaskJob {
         id: id.clone(),
         kind: "film_import".into(),
-        project_id: Some(req.project_id.clone()),
+        project_id: Some(project_id.clone()),
         payload: serde_json::json!({
-            "projectId": req.project_id,
-            "videoPath": req.video_path,
-            "script": req.script,
+            "projectId": project_id,
+            "videoPath": video_path,
+            "script": script,
         }),
-        channel: req.on_progress,
+        channel: on_progress,
     };
     state.task_tx.send(job).await.map_err(|e| e.to_string())?;
     Ok(id)
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FilmSmartCutReq {
-    pub project_id: String,
-    pub script: String,
-    pub on_progress: Channel<ProgressMsg>,
-}
-
-#[tauri::command]
-pub async fn film_smart_cut(state: State<'_, AppState>, req: FilmSmartCutReq) -> Result<String, String> {
+#[tauri::command(rename_all = "camelCase")]
+pub async fn film_smart_cut(
+    state: State<'_, AppState>,
+    project_id: String,
+    script: String,
+    on_progress: Channel<ProgressMsg>,
+) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
-    db::task_create(&state.pool, &id, "film_smart_cut", Some(&req.project_id)).await?;
+    db::task_create(&state.pool, &id, "film_smart_cut", Some(&project_id)).await?;
     let job = TaskJob {
         id: id.clone(),
         kind: "film_smart_cut".into(),
-        project_id: Some(req.project_id.clone()),
+        project_id: Some(project_id.clone()),
         payload: serde_json::json!({
-            "projectId": req.project_id,
-            "script": req.script,
+            "projectId": project_id,
+            "script": script,
         }),
-        channel: req.on_progress,
+        channel: on_progress,
     };
     state.task_tx.send(job).await.map_err(|e| e.to_string())?;
     Ok(id)
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FilmExportReq {
-    pub project_id: String,
-    #[serde(default)]
-    pub hw: bool,
-    #[serde(default)]
-    pub resolution: String,
-    #[serde(default = "default_true")]
-    pub burn_sub: bool,
-    #[serde(default)]
-    pub mix_voice: bool,
-    #[serde(default)]
-    pub voice_mix: f64,
-    #[serde(default)]
-    pub script: String,
-    pub on_progress: Channel<ProgressMsg>,
-}
-
-#[tauri::command]
-pub async fn film_export(state: State<'_, AppState>, req: FilmExportReq) -> Result<String, String> {
+#[tauri::command(rename_all = "camelCase")]
+pub async fn film_export(
+    state: State<'_, AppState>,
+    project_id: String,
+    hw: bool,
+    resolution: String,
+    burn_sub: bool,
+    mix_voice: bool,
+    voice_mix: f64,
+    script: String,
+    on_progress: Channel<ProgressMsg>,
+) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
-    db::task_create(&state.pool, &id, "film_export", Some(&req.project_id)).await?;
+    db::task_create(&state.pool, &id, "film_export", Some(&project_id)).await?;
     let job = TaskJob {
         id: id.clone(),
         kind: "film_export".into(),
-        project_id: Some(req.project_id.clone()),
+        project_id: Some(project_id.clone()),
         payload: serde_json::json!({
-            "projectId": req.project_id,
-            "hw": req.hw,
-            "resolution": req.resolution,
-            "burnSub": req.burn_sub,
-            "mixVoice": req.mix_voice,
-            "voiceMix": req.voice_mix,
-            "script": req.script,
+            "projectId": project_id,
+            "hw": hw,
+            "resolution": resolution,
+            "burnSub": burn_sub,
+            "mixVoice": mix_voice,
+            "voiceMix": voice_mix,
+            "script": script,
         }),
-        channel: req.on_progress,
+        channel: on_progress,
     };
     state.task_tx.send(job).await.map_err(|e| e.to_string())?;
     Ok(id)

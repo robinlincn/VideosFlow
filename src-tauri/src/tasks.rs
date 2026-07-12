@@ -7,6 +7,7 @@ use tauri::ipc::Channel;
 use tokio::sync::mpsc;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use reqwest::Client;
 use sqlx::sqlite::SqlitePool;
@@ -51,9 +52,9 @@ async fn run_loop(pool: SqlitePool, client: Client, port: u16, data_dir: std::pa
 }
 
 async fn run_job(pool: &SqlitePool, client: &Client, port: u16, data_dir: &Path, job: TaskJob) {
-    let emit = |m: ProgressMsg| {
-        let _ = job.channel.send(m);
-    };
+    let channel = job.channel.clone();
+    let emit: Arc<dyn Fn(ProgressMsg) + Send + Sync> =
+        Arc::new(move |m: ProgressMsg| { let _ = channel.send(m); });
 
     emit(ProgressMsg {
         task_id: job.id.clone(),
@@ -124,7 +125,7 @@ async fn run_job(pool: &SqlitePool, client: &Client, port: u16, data_dir: &Path,
             return;
         }
         "film_import" => {
-            match run_film_import(pool, client, port, data_dir, &job, &emit).await {
+            match run_film_import(pool, client, port, data_dir, &job, emit.clone()).await {
                 Ok(degraded) => {
                     db::task_update(pool, &job.id, "done", 100.0, "导入对齐完成").await.ok();
                     emit(ProgressMsg {
@@ -149,7 +150,7 @@ async fn run_job(pool: &SqlitePool, client: &Client, port: u16, data_dir: &Path,
             return;
         }
         "film_smart_cut" => {
-            match run_film_smart_cut(pool, client, port, data_dir, &job, &emit).await {
+            match run_film_smart_cut(pool, client, port, data_dir, &job, emit.clone()).await {
                 Ok(clip_count) => {
                     db::task_update(pool, &job.id, "done", 100.0, "智能粗剪完成").await.ok();
                     emit(ProgressMsg {
@@ -174,7 +175,7 @@ async fn run_job(pool: &SqlitePool, client: &Client, port: u16, data_dir: &Path,
             return;
         }
         "film_export" => {
-            match run_film_export(pool, client, port, data_dir, &job, &emit).await {
+            match run_film_export(pool, client, port, data_dir, &job, emit.clone()).await {
                 Ok(out_path) => {
                     db::task_update(pool, &job.id, "done", 100.0, "导出完成").await.ok();
                     emit(ProgressMsg {
@@ -387,7 +388,7 @@ async fn run_film_import(
     port: u16,
     data_dir: &Path,
     job: &TaskJob,
-    emit: &dyn Fn(ProgressMsg),
+    emit: Arc<dyn Fn(ProgressMsg) + Send + Sync>,
 ) -> Result<bool, String> {
     let project_id = job.project_id.clone().ok_or("film_import 缺少 projectId")?;
     let video_path = job
@@ -483,11 +484,11 @@ async fn run_film_import(
 /// 智能粗剪：载入时间线 → 分段+对齐 → 静音检测 → 生成多轨粗剪时间线。
 async fn run_film_smart_cut(
     pool: &SqlitePool,
-    client: &Client,
-    port: u16,
+    _client: &Client,
+    _port: u16,
     data_dir: &Path,
     job: &TaskJob,
-    emit: &dyn Fn(ProgressMsg),
+    emit: Arc<dyn Fn(ProgressMsg) + Send + Sync>,
 ) -> Result<usize, String> {
     let project_id = job.project_id.clone().ok_or("film_smart_cut 缺少 projectId")?;
     let script = job
@@ -630,7 +631,7 @@ async fn run_film_export(
     port: u16,
     data_dir: &Path,
     job: &TaskJob,
-    emit: &dyn Fn(ProgressMsg),
+    emit: Arc<dyn Fn(ProgressMsg) + Send + Sync>,
 ) -> Result<String, String> {
     let project_id = job.project_id.clone().ok_or("film_export 缺少 projectId")?;
     let hw = job.payload.get("hw").and_then(|v| v.as_bool()).unwrap_or(false);

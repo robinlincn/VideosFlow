@@ -3,7 +3,7 @@
 // M2：film_categories / film_projects / edit_timelines 全量 CRUD + 时间线领域模型。
 
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
 use std::collections::HashMap;
 
