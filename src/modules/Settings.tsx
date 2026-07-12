@@ -9,7 +9,7 @@ import {
 const PROVIDER_OPTS: Record<string, string[]> = {
   llm: ['Agnes', 'OpenAI 兼容', 'DeepSeek', '通义', '豆包', '混元', 'Ollama'],
   img: ['Agnes', '通义万相', 'SDXL', 'DALL·E', 'Midjourney'],
-  asr: ['Agnes', '云 ASR', '本地 faster-whisper', 'Whisper'],
+  asr: ['XiaomiMimo', 'Agnes', '云 ASR', '本地 faster-whisper', 'Whisper'],
   tts: ['Mimo', 'Edge-TTS', 'CosyVoice', '云 TTS'],
   video: ['Agnes', 'Runway', '通义万相', 'SVD', 'Pika'],
 };

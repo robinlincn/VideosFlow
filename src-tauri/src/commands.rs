@@ -4,6 +4,7 @@
 //     film_import / film_smart_cut / film_export（后三者内部提交异步任务并经 Channel 推进度）。
 
 use serde::Deserialize;
+use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::State;
 
@@ -67,20 +68,52 @@ pub async fn provider_key_get(kind: String) -> Result<Option<String>, String> {
     cred::get_key(&kind)
 }
 
+/// 连接测试：Rust 端直接用 reqwest 探测 Base URL 可达性 + 鉴权有效性，
+/// 不再依赖 Python sidecar（sidecar 仅在口播/创作模块运行时启用，设置页测试不应被其阻塞）。
 #[tauri::command]
 pub async fn provider_test(state: State<'_, AppState>, kind: String) -> Result<String, String> {
     let row = db::get_by_kind(&state.pool, &kind).await?;
     let key = cred::get_key(&kind)?;
-    let cfg = python::build_cfg(&row, key);
-    let env = if kind == "llm" {
-        python::call_chat(&state.client, state.sidecar_port, &cfg, "ping", 1).await?
-    } else {
-        python::call_test(&state.client, state.sidecar_port, &cfg).await?
-    };
-    if env.ok {
-        Ok("ok".into())
-    } else {
-        Err(env.message)
+    let base = row.base_url.trim().to_string();
+    if base.is_empty() {
+        return Err("请先填写 Base URL 再测试连接".into());
+    }
+    let client = &state.client;
+    let has_key = key.as_ref().map(|k| !k.is_empty()).unwrap_or(false);
+    // 优先尝试 OpenAI 兼容的 /models 端点（可同时验证鉴权有效性）
+    let models_url = format!("{}/models", base.trim_end_matches('/'));
+    let mut req = client.get(&models_url).timeout(Duration::from_secs(8));
+    if let Some(k) = &key {
+        if !k.is_empty() {
+            req = req.bearer_auth(k);
+        }
+    }
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                return Ok("ok".into());
+            }
+            let code = status.as_u16();
+            if (code == 401 || code == 403) && has_key {
+                return Err("地址可达，但 API Key 无效或未授权（HTTP 401/403）".into());
+            }
+            if code == 404 {
+                // /models 不被该网关支持，退回基础连通测试（地址可达即视为 ok）
+                return match client.get(&base).timeout(Duration::from_secs(8)).send().await {
+                    Ok(_) => Ok("ok".into()),
+                    Err(e) => Err(format!("无法连接到 {base}：{e}")),
+                };
+            }
+            return Err(format!("连接返回异常状态码 {code}"));
+        }
+        Err(_) => {
+            // /models 探测网络层失败（网关可能不支持该路径），退回对根地址探测
+            match client.get(&base).timeout(Duration::from_secs(8)).send().await {
+                Ok(_) => Ok("ok".into()),
+                Err(e) => Err(format!("无法连接到 {base}：{e}")),
+            }
+        }
     }
 }
 

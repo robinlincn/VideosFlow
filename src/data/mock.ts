@@ -239,7 +239,7 @@ export const initialSettings: SettingsState = {
   providers: {
     llm: { name: '文字大模型', provider: 'OpenAI 兼容', baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-************M2vN', model: 'gpt-4o-mini', enabled: true, test: 'ok' },
     img: { name: '图片大模型', provider: '通义万相', baseUrl: 'https://dashscope.aliyuncs.com/api/v1', apiKey: 'sk-************tPx8', model: 'wanx-v1', enabled: true, test: 'ok' },
-    asr: { name: '语音识别', provider: '本地 faster-whisper', baseUrl: '', apiKey: '', model: 'medium', enabled: true, test: 'local' },
+    asr: { name: '语音识别', provider: 'XiaomiMimo', baseUrl: 'https://api.xiaomimimo.com/v1', apiKey: '', model: 'mimo-v2.5-asr', enabled: true, test: 'idle' },
     tts: { name: '语音合成', provider: 'Edge-TTS', baseUrl: '', apiKey: '', model: 'zh-CN-XiaoxiaoNeural', enabled: true, test: 'ok' },
     video: { name: '视频大模型', provider: 'Runway / 通义万相', baseUrl: '', apiKey: 'sk-************aB91', model: 'gen-3', enabled: false, test: 'idle' },
   },

@@ -229,7 +229,7 @@ async fn seed_defaults(pool: &SqlitePool) -> Result<(), String> {
         ("llm", "文字大模型", "agnes", "https://apihub.agnes-ai.com/v1", "agnes-2.0-flash"),
         ("img", "图片大模型", "agnes", "https://apihub.agnes-ai.com/v1", "agnes-image-2.1-flash"),
         ("video", "视频大模型", "agnes", "https://apihub.agnes-ai.com/v1", "agnes-video-v2.0"),
-        ("asr", "语音识别", "agnes", "https://apihub.agnes-ai.com/v1", "agnes-asr-1.0"),
+        ("asr", "语音识别", "XiaomiMimo", "https://api.xiaomimimo.com/v1", "mimo-v2.5-asr"),
         ("tts", "语音合成", "mimo", "https://api.xiaomimimo.com/v1", "mimo-v2.5-tts"),
     ];
     for (kind, name, provider, base, model) in defaults {
