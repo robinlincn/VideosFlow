@@ -589,6 +589,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
       providers[r.kind] = {
         name: r.name, provider: r.provider, baseUrl: r.baseUrl,
         apiKey: '', model: r.model, enabled: r.enabled,
+        hasKey: r.hasKey,
         test: r.hasKey ? 'ok' : 'idle',
       };
     }

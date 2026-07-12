@@ -79,7 +79,7 @@ export interface CreationState {
 
 export interface ProviderCfg {
   name: string; provider: string; baseUrl: string; apiKey: string;
-  model: string; enabled: boolean; test: string;
+  model: string; enabled: boolean; test: string; hasKey: boolean;
 }
 export interface PromptCfg { name: string; body: string; placeholder: string; }
 export interface SettingsState {
@@ -237,11 +237,11 @@ export const initialSpokenVideos: SpokenVideo[] = [
 
 export const initialSettings: SettingsState = {
   providers: {
-    llm: { name: '文字大模型', provider: 'OpenAI 兼容', baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-************M2vN', model: 'gpt-4o-mini', enabled: true, test: 'ok' },
-    img: { name: '图片大模型', provider: '通义万相', baseUrl: 'https://dashscope.aliyuncs.com/api/v1', apiKey: 'sk-************tPx8', model: 'wanx-v1', enabled: true, test: 'ok' },
-    asr: { name: '语音识别', provider: 'XiaomiMimo', baseUrl: 'https://api.xiaomimimo.com/v1', apiKey: '', model: 'mimo-v2.5-asr', enabled: true, test: 'idle' },
-    tts: { name: '语音合成', provider: 'Edge-TTS', baseUrl: '', apiKey: '', model: 'zh-CN-XiaoxiaoNeural', enabled: true, test: 'ok' },
-    video: { name: '视频大模型', provider: 'Runway / 通义万相', baseUrl: '', apiKey: 'sk-************aB91', model: 'gen-3', enabled: false, test: 'idle' },
+    llm: { name: '文字大模型', provider: 'OpenAI 兼容', baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-************M2vN', model: 'gpt-4o-mini', enabled: true, hasKey: false, test: 'ok' },
+    img: { name: '图片大模型', provider: '通义万相', baseUrl: 'https://dashscope.aliyuncs.com/api/v1', apiKey: 'sk-************tPx8', model: 'wanx-v1', enabled: true, hasKey: false, test: 'ok' },
+    asr: { name: '语音识别', provider: 'XiaomiMimo', baseUrl: 'https://api.xiaomimimo.com/v1', apiKey: '', model: 'mimo-v2.5-asr', enabled: true, hasKey: false, test: 'idle' },
+    tts: { name: '语音合成', provider: 'Edge-TTS', baseUrl: '', apiKey: '', model: 'zh-CN-XiaoxiaoNeural', enabled: true, hasKey: false, test: 'ok' },
+    video: { name: '视频大模型', provider: 'Runway / 通义万相', baseUrl: '', apiKey: 'sk-************aB91', model: 'gen-3', enabled: false, hasKey: false, test: 'idle' },
   },
   prompts: {
     script: { name: '自动写文案', body: '请你担任资深短视频文案，根据以下需求撰写一份适合配音的画面感文案，长度约 60-80 字，语气自然：\n\n需求：{{brief}}\n风格：{{style}}\n受众：{{audience}}', placeholder: '{{brief}}\n{{style}}\n{{audience}}' },

@@ -71,6 +71,11 @@ function ApiView() {
           await setProviderKey(k, p.apiKey.trim());
         }
       }
+      // 保存后重新拉取后端配置，刷新「已保存 KEY」标记，使 UI 立即显示已保存提示
+      try {
+        const rows = await loadProviders();
+        actions.hydrateProviders(rows);
+      } catch { /* 刷新失败不影响已保存结果 */ }
       actions.task('配置已保存 ✓', 100);
     } catch (e) {
       actions.task('保存失败: ' + String(e), 100);
@@ -121,6 +126,9 @@ function ApiView() {
             : p.test === 'fail' ? '连接失败'
             : p.test === 'idle' ? '未测试'
             : p.test;
+          const keyHint = p.hasKey
+            ? (p.apiKey ? '检测到已保存的 KEY，填写新值将覆盖原 KEY' : '已保存 API Key（明文不回显）；如需更换请填写新 KEY')
+            : (p.apiKey ? '将保存新的 API Key' : '尚未保存 API Key（相关功能受限）');
           return (
             <div key={k} className="pcard">
               <div className="ph"><span className="dot" /><b>{p.name}</b>
@@ -132,7 +140,9 @@ function ApiView() {
               </div>
               <div className="field"><label>Base URL</label><input value={p.baseUrl} placeholder="(留空使用默认)" onChange={(e) => actions.set({ settingsState: { ...state.settingsState, providers: { ...state.settingsState.providers, [k]: { ...p, baseUrl: e.target.value } } } })} /></div>
               <div className="field"><label>模型</label><input value={p.model} onChange={(e) => actions.set({ settingsState: { ...state.settingsState, providers: { ...state.settingsState.providers, [k]: { ...p, model: e.target.value } } } })} /></div>
-              <div className="field"><label>API Key</label><input type="password" value={p.apiKey} placeholder="存入系统凭据，不进 SQLite 明文" onChange={(e) => actions.set({ settingsState: { ...state.settingsState, providers: { ...state.settingsState.providers, [k]: { ...p, apiKey: e.target.value } } } })} /></div>
+              <div className="field"><label>API Key</label><input type="password" value={p.apiKey} placeholder="存入系统凭据，不进 SQLite 明文" onChange={(e) => actions.set({ settingsState: { ...state.settingsState, providers: { ...state.settingsState.providers, [k]: { ...p, apiKey: e.target.value } } } })} />
+                <div className="muted sm" style={{ marginTop: 4, color: p.hasKey ? 'var(--accent, #b85c38)' : 'var(--muted, #8a7f74)' }}>{keyHint}</div>
+              </div>
               <div style={{ display: 'flex', gap: 8, marginTop: 6, alignItems: 'center' }}>
                 <button className="btn sm ghost" onClick={() => handleTest(k)} disabled={p.test === 'testing'}>🔌 测试连接</button>
                 <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, color: 'var(--muted)' }}>
