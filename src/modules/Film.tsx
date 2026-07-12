@@ -4,6 +4,9 @@ import { filmSteps } from '../data/mock';
 import type { TimelineEnvelope, TimelineClip } from '../ipc/types';
 import TimelineEditor from '../components/TimelineEditor';
 import FlowerPreview from '../components/FlowerPreview';
+import {
+  PlusIcon, ArrowLeftIcon, UploadIcon, MoveUpIcon, MoveDownIcon, PencilIcon, Trash2Icon,
+} from '../components/icons';
 
 const STEP_DESC: Record<string, string> = {
   gen: '根据影片生成可编辑的解说文案',
@@ -36,10 +39,10 @@ export default function Film() {
                 <span>{c.name}</span>
                 <span className="n">{filmProjects[c.id]?.length || 0}</span>
                 <span className="lp-acts" style={{ display: 'inline-flex', gap: 2, marginLeft: 6 }} onClick={(e) => e.stopPropagation()}>
-                  <button className="ic" style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 11, padding: '0 2px' }} title="上移" onClick={() => actions.moveCat(c.id, -1)}>▲</button>
-                  <button className="ic" style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 11, padding: '0 2px' }} title="下移" onClick={() => actions.moveCat(c.id, 1)}>▼</button>
-                  <button className="ic" style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 11, padding: '0 2px' }} title="重命名" onClick={() => { const n = window.prompt('重命名类型', c.name); if (n) actions.renameCat(c.id, n); }}>✎</button>
-                  <button className="ic" style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 11, padding: '0 2px' }} title="删除" onClick={() => { setDelCat({ id: c.id, name: c.name }); setDelStrategy('cascade'); setDelTarget(otherCats[0]?.id || ''); }}>🗑</button>
+                  <button className="ic" title="上移" onClick={() => actions.moveCat(c.id, -1)}><MoveUpIcon size={12} /></button>
+                  <button className="ic" title="下移" onClick={() => actions.moveCat(c.id, 1)}><MoveDownIcon size={12} /></button>
+                  <button className="ic" title="重命名" onClick={() => { const n = window.prompt('重命名类型', c.name); if (n) actions.renameCat(c.id, n); }}><PencilIcon size={12} /></button>
+                  <button className="ic danger" title="删除" onClick={() => { setDelCat({ id: c.id, name: c.name }); setDelStrategy('cascade'); setDelTarget(otherCats[0]?.id || ''); }}><Trash2Icon size={12} /></button>
                 </span>
               </div>
             ))}
@@ -47,16 +50,18 @@ export default function Film() {
           <div style={{ marginTop: 12, display: 'flex', gap: 6 }}>
             <input className="mini" style={{ flex: 1 }} placeholder="新建类型" value={newCat} onChange={(e) => setNewCat(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && newCat.trim()) { actions.createCat(newCat.trim()); setNewCat(''); } }} />
-            <button className="btn sm" disabled={!newCat.trim()} onClick={() => { actions.createCat(newCat.trim()); setNewCat(''); }}>＋</button>
+            <button className="btn sm" disabled={!newCat.trim()} onClick={() => { actions.createCat(newCat.trim()); setNewCat(''); }}><PlusIcon /> 类型</button>
           </div>
-          <button className="btn sm" style={{ marginTop: 14, width: '100%' }} onClick={() => actions.importFilm()}>⬇ 导入影片</button>
         </div>
         <div>
-          <div className="sec-title">工程库 · {cats.find((c) => c.id === filmCat)?.name}</div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+            <div className="sec-title" style={{ marginBottom: 0 }}>工程库 · {cats.find((c) => c.id === filmCat)?.name}</div>
+            <button className="btn sm" onClick={() => actions.importFilm()}><UploadIcon /> 导入影片</button>
+          </div>
           <div className="proj-grid">
             {projects.map((p) => (
               <div key={p.id} className="proj-card" onClick={() => actions.openEditor(filmCat, p.id, p.title)}>
-                <button className="x" style={{ position: 'absolute', top: 6, right: 8 }} onClick={(e) => { e.stopPropagation(); if (window.confirm('删除工程「' + p.title + '」？')) actions.deleteProject(p.id); }}>×</button>
+                <button className="x" style={{ position: 'absolute', top: 6, right: 8 }} onClick={(e) => { e.stopPropagation(); if (window.confirm('删除工程「' + p.title + '」？')) actions.deleteProject(p.id); }}><Trash2Icon size={12} /></button>
                 <div className="pt">{p.title}</div>
                 <div className={'ps s-' + p.status}>{p.status}</div>
                 <select className="mini" style={{ marginTop: 8, width: '100%' }} value={p.status}
@@ -67,8 +72,13 @@ export default function Film() {
               </div>
             ))}
           </div>
-          {projects.length === 0 && <div className="muted sm" style={{ marginTop: 14 }}>该类型下暂无工程，点击「导入影片」创建。</div>}
-          <div className="muted sm" style={{ marginTop: 14 }}>点击卡片进入「剪辑台」（基于文案智能剪辑 + 时间线精修 + 字幕花字）。</div>
+          {projects.length === 0 && (
+            <div className="empty-hint" style={{ padding: 'var(--space-10) 0' }}>
+              该类型下暂无工程<br />
+              <button className="btn" style={{ marginTop: 16 }} onClick={() => actions.importFilm()}><UploadIcon /> 导入影片</button>
+            </div>
+          )}
+          {projects.length > 0 && <div className="muted sm" style={{ marginTop: 14 }}>点击卡片进入剪辑台（基于文案智能剪辑 + 时间线精修 + 字幕花字）。</div>}
         </div>
 
         {delCat && (
@@ -104,7 +114,13 @@ export default function Film() {
   const videoClips = timeline?.tracks.find((t) => t.kind === 'video')?.clips || [];
   return (
     <div>
-      <div className="sec-title">剪辑台 · {state.editingProj?.t}</div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18, flexWrap: 'wrap', gap: 12 }}>
+        <div className="sec-title" style={{ marginBottom: 0 }}>剪辑台 · {state.editingProj?.t}</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn sm ghost" onClick={() => actions.goLibrary()}><ArrowLeftIcon /> 返回影片库</button>
+          <button className="btn sm" onClick={() => actions.importFilm()}><UploadIcon /> 导入新影片</button>
+        </div>
+      </div>
       <div className="muted sm" style={{ marginBottom: 12 }}>{STEP_DESC[editorSub]}</div>
       <StepPills current={editorSub} onPick={actions.goEditorSub} />
 

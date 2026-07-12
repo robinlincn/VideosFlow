@@ -23,6 +23,7 @@ pub struct AppState {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle().clone();
             let result: Result<(), String> = tauri::async_runtime::block_on(async move {

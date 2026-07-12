@@ -13,6 +13,13 @@ import {
   X,
   Download,
   ChevronRight,
+  Plus,
+  ArrowLeft,
+  Upload,
+  MoveUp,
+  MoveDown,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 
 interface IconProps {
@@ -65,4 +72,32 @@ export const DownloadIcon = ({ size = 14 }: IconProps) => (
 
 export const ChevronRightIcon = ({ size = 14 }: IconProps) => (
   <ChevronRight size={size} strokeWidth={1.8} />
+);
+
+export const PlusIcon = ({ size = 14 }: IconProps) => (
+  <Plus size={size} strokeWidth={1.8} />
+);
+
+export const ArrowLeftIcon = ({ size = 14 }: IconProps) => (
+  <ArrowLeft size={size} strokeWidth={1.8} />
+);
+
+export const UploadIcon = ({ size = 14 }: IconProps) => (
+  <Upload size={size} strokeWidth={1.8} />
+);
+
+export const MoveUpIcon = ({ size = 14 }: IconProps) => (
+  <MoveUp size={size} strokeWidth={1.8} />
+);
+
+export const MoveDownIcon = ({ size = 14 }: IconProps) => (
+  <MoveDown size={size} strokeWidth={1.8} />
+);
+
+export const PencilIcon = ({ size = 14 }: IconProps) => (
+  <Pencil size={size} strokeWidth={1.8} />
+);
+
+export const Trash2Icon = ({ size = 14 }: IconProps) => (
+  <Trash2 size={size} strokeWidth={1.8} />
 );

@@ -8,6 +8,7 @@ import {
   initialSettings, initialCreation, defaultSubs, type EditorState as EditorStateType,
 } from '../data/mock';
 import { downloadJson, toSec } from '../lib/jianying';
+import { open } from '@tauri-apps/plugin-dialog';
 import {
   loadFilmCats, createFilmCategory, renameFilmCategory, reorderFilmCategory, deleteFilmCategory,
   loadFilmProjects, createFilmProject, updateFilmProject, deleteFilmProject,
@@ -51,11 +52,11 @@ function fmtSec(s: number): string {
 }
 
 /** 构建一个新的工程级 EditorState（清空导入/对齐/时间线状态）。 */
-function freshEditorState(projectId: string, videoName: string): EditorStateType {
+function freshEditorState(projectId: string, videoName: string, videoPath = ''): EditorStateType {
   return {
     projectId,
     videoName,
-    videoPath: '',
+    videoPath,
     script: initialEditorState.script,
     imported: false,
     aligned: false,
@@ -180,9 +181,21 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
   // ---------- 影片：工程库 CRUD ----------
   const importFilm = async () => {
     const cat = get().filmCat;
-    const list = get().filmProjects[cat] || [];
-    const title = '新素材 ' + (list.length + 1);
     try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{
+          name: '视频文件',
+          extensions: ['mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v'],
+        }],
+        title: '选择要导入的视频',
+      });
+      if (!selected) return;
+      const videoPath = Array.isArray(selected) ? selected[0] : selected;
+      const fileName = videoPath.replace(/.*[\\/]/, '');
+      const list = get().filmProjects[cat] || [];
+      const title = fileName.replace(/\.[^.]+$/, '') || ('新素材 ' + (list.length + 1));
       const id = await createFilmProject(cat, title, null);
       set((s) => {
         const projects = {
@@ -197,12 +210,12 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
           editingProj: { cat, id, t: title },
           filmStage: 'editor',
           editorSub: 'gen',
-          editorState: freshEditorState(id, title + '.mp4'),
+          editorState: freshEditorState(id, fileName, videoPath),
         };
       });
-      task('已创建工程 ✓', 100);
+      task('已导入工程 ✓', 100);
     } catch (e) {
-      task('创建工程失败：' + String(e), 100);
+      task('导入失败：' + String(e), 100);
     }
   };
 
@@ -358,8 +371,12 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
   const archiveToFilm = async () => {
     await saveTimeline();
     const cat = get().editingProj?.cat ?? get().filmCat;
-    patch({ filmStage: 'library' });
+    patch({ filmStage: 'library', editingProj: null });
     await loadProjects(cat);
+  };
+
+  const goLibrary = () => {
+    patch({ filmStage: 'library', editingProj: null });
   };
 
   // ---------- 影片：花字选择（与口播共用 editorState.flower） ----------
@@ -595,7 +612,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
     createCat, renameCat, reorderCat, moveCat, deleteCat,
     importFilm, openEditor, updateProject, deleteProject, goEditorSub, genFilmScript, alignFilm,
     genVoiceForFilm, reVoiceForFilm, editVoiceLine, setVoiceMix, previewMix, autoCut,
-    saveTimeline, archiveToFilm, pickFlower, setExportOpt, exportFilm,
+    saveTimeline, archiveToFilm, goLibrary, pickFlower, setExportOpt, exportFilm,
     uploadSpoken, transcribe, setIssue, acceptAllIssues, ignoreAllIssues, cleanFromAccepted,
     uploadAsset, delAsset, doMatch, toggleMatch, applyAllMatch,
     pickSpokenFlower, burnFlower, exportSpoken, exportSpokenJianYing,
