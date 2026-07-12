@@ -18,8 +18,12 @@ pub fn ping() -> String {
 #[tauri::command]
 pub async fn provider_list(state: State<'_, AppState>) -> Result<Vec<db::ProviderRow>, String> {
     let mut rows = db::list(&state.pool).await?;
+    // DB 的 has_key 列为权威标记（密钥写入成功即置位）；仅在 DB 为 false 时回退凭据库探测，
+    // 兼容历史已存密钥，且避免 Windows 凭据库回读不稳导致 UI 误报「尚未保存」。
     for r in rows.iter_mut() {
-        r.has_key = cred::has_key(&r.kind);
+        if !r.has_key {
+            r.has_key = cred::has_key(&r.kind);
+        }
     }
     Ok(rows)
 }
@@ -38,8 +42,22 @@ pub async fn provider_upsert(
 }
 
 #[tauri::command]
-pub async fn provider_key_set(kind: String, key: String) -> Result<(), String> {
-    cred::set_key(&kind, &key)
+pub async fn provider_key_set(
+    state: State<'_, AppState>,
+    kind: String,
+    key: String,
+) -> Result<(), String> {
+    if key.trim().is_empty() {
+        // 清空密钥：从凭据库删除，并把 DB 标记复位
+        let _ = cred::delete_key(&kind);
+        db::set_has_key(&state.pool, &kind, false).await?;
+        return Ok(());
+    }
+    // 写入系统凭据库；成功后以 DB 布尔标记记录「已保存」，作为 UI 提示权威来源。
+    // 密钥本体始终只存凭据库，绝不落 SQLite 明文（安全红线）。
+    cred::set_key(&kind, &key)?;
+    db::set_has_key(&state.pool, &kind, true).await?;
+    Ok(())
 }
 
 #[tauri::command]

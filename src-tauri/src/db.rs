@@ -168,7 +168,7 @@ pub async fn init(pool: &SqlitePool) -> Result<(), String> {
         "CREATE TABLE IF NOT EXISTS generated_assets(id TEXT PRIMARY KEY, shot_id TEXT, kind TEXT, path TEXT, created_at INTEGER)",
         "CREATE TABLE IF NOT EXISTS voiceovers(id TEXT PRIMARY KEY, project_id TEXT, shot_id TEXT, voice_id TEXT, path TEXT)",
         "CREATE TABLE IF NOT EXISTS subtitles(id TEXT PRIMARY KEY, project_id TEXT, start REAL, end REAL, text TEXT, style_id TEXT)",
-        "CREATE TABLE IF NOT EXISTS provider_config(id TEXT PRIMARY KEY, kind TEXT UNIQUE, name TEXT, provider TEXT, base_url TEXT, api_key TEXT, model TEXT, extra TEXT, enabled INT DEFAULT 1)",
+        "CREATE TABLE IF NOT EXISTS provider_config(id TEXT PRIMARY KEY, kind TEXT UNIQUE, name TEXT, provider TEXT, base_url TEXT, api_key TEXT, model TEXT, extra TEXT, enabled INT DEFAULT 1, has_key INTEGER DEFAULT 0)",
         "CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, project_id TEXT, \"type\" TEXT, status TEXT, progress REAL, log TEXT, created_at INTEGER)",
     ];
     for s in stmts {
@@ -179,6 +179,28 @@ pub async fn init(pool: &SqlitePool) -> Result<(), String> {
     }
     seed_defaults(pool).await?;
     seed_film_categories(pool).await?;
+    ensure_provider_has_key_col(pool).await?;
+    Ok(())
+}
+
+/// 兼容已存在的旧 DB：provider_config 早期没有 has_key 列，这里按需 ALTER 补列。
+/// 全新 DB 因建表语句已含该列，PRAGMA 探测到后会跳过。
+async fn ensure_provider_has_key_col(pool: &SqlitePool) -> Result<(), String> {
+    let cols = sqlx::query("PRAGMA table_info(provider_config)")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let has = cols.iter().any(|r| {
+        r.try_get::<String, _>("name")
+            .map(|n| n == "has_key")
+            .unwrap_or(false)
+    });
+    if !has {
+        sqlx::query("ALTER TABLE provider_config ADD COLUMN has_key INTEGER DEFAULT 0")
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -259,13 +281,15 @@ fn row_to_provider(r: &sqlx::sqlite::SqliteRow) -> Result<ProviderRow, String> {
         base_url: r.try_get("base_url").map_err(|e| e.to_string())?,
         model: r.try_get("model").map_err(|e| e.to_string())?,
         enabled: r.try_get::<i64, _>("enabled").map_err(|e| e.to_string())? != 0,
-        has_key: false, // 由调用方按凭据库补充
+        // has_key 以 DB 布尔列为权威标记（写入密钥成功后由 provider_key_set 置位），
+        // 仅在 DB 为 false 时由调用方回退凭据库探测，避免被凭据库回读不稳拖累 UI。
+        has_key: r.try_get::<i64, _>("has_key").map(|v| v != 0).unwrap_or(false),
     })
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<ProviderRow>, String> {
     let rows = sqlx::query(
-        "SELECT id,kind,name,provider,base_url,model,enabled FROM provider_config ORDER BY kind",
+        "SELECT id,kind,name,provider,base_url,model,enabled,has_key FROM provider_config ORDER BY kind",
     )
     .fetch_all(pool)
     .await
@@ -275,7 +299,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<ProviderRow>, String> {
 
 pub async fn get_by_kind(pool: &SqlitePool, kind: &str) -> Result<ProviderRow, String> {
     let r = sqlx::query(
-        "SELECT id,kind,name,provider,base_url,model,enabled FROM provider_config WHERE kind=?",
+        "SELECT id,kind,name,provider,base_url,model,enabled,has_key FROM provider_config WHERE kind=?",
     )
     .bind(kind)
     .fetch_optional(pool)
@@ -305,11 +329,23 @@ pub async fn upsert(
     .bind(provider)
     .bind(base_url)
     .bind(model)
-    .bind(if enabled { 1i64 } else { 0i64 })
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+        .bind(if enabled { 1i64 } else { 0i64 })
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 写入某网关「是否已存密钥」的布尔标记（注意：仅存标记，密钥本体只在系统凭据库）。
+/// 这是 UI 显示「已保存 KEY」提示的权威来源，写入成功后由 provider_key_set 置 true。
+pub async fn set_has_key(pool: &SqlitePool, kind: &str, v: bool) -> Result<(), String> {
+    sqlx::query("UPDATE provider_config SET has_key=? WHERE kind=?")
+        .bind(if v { 1i64 } else { 0i64 })
+        .bind(kind)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 pub async fn task_create(
