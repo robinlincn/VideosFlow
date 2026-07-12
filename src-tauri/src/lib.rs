@@ -6,7 +6,6 @@ mod commands;
 mod cred;
 mod db;
 mod ffmpeg;
-mod python;
 mod tasks;
 
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
@@ -40,20 +39,11 @@ pub fn run() {
                     .map_err(|e| format!("SQLite 连接失败: {e}"))?;
                 db::init(&pool).await?;
 
-                // HTTP 客户端（调用 sidecar）
+                // HTTP 客户端（直连各云网关：Agnes 对话 / XiaomiMimo ASR·TTS）
                 let client = reqwest::Client::new();
 
-                // Python sidecar（best-effort，启动失败不阻塞主程序）
-                let port = python::DEFAULT_PORT;
-                let _guard = python::spawn_sidecar(
-                    handle
-                        .path()
-                        .resource_dir()
-                        .map(|p| p.to_path_buf())
-                        .as_deref()
-                        .unwrap_or(&data_dir),
-                    port,
-                );
+                // 影片 ASR/TTS 已改为 Rust reqwest 直连 XiaomiMimo，不再启动 Python sidecar。
+                let port = 8731u16; // 仅保留给任务队列签名兼容（不再用于 sidecar）
 
                 // 任务队列 + worker
                 let (tx, rx) = tokio::sync::mpsc::channel::<tasks::TaskJob>(32);

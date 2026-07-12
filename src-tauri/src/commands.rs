@@ -8,7 +8,7 @@ use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::State;
 
-use crate::{cred, db, python, tasks::ProgressMsg, tasks::TaskJob, AppState};
+use crate::{cred, db, tasks::ProgressMsg, tasks::TaskJob, AppState};
 
 #[tauri::command]
 pub fn ping() -> String {

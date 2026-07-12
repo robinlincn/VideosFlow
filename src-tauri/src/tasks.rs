@@ -12,9 +12,12 @@ use std::sync::Arc;
 use reqwest::Client;
 use sqlx::sqlite::SqlitePool;
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
+
 use crate::db;
 use crate::ffmpeg::{self, FfMpeg};
-use crate::{cred, python};
+use crate::cred;
 
 #[derive(Serialize, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,42 +68,7 @@ async fn run_job(pool: &SqlitePool, client: &Client, port: u16, data_dir: &Path,
     });
     db::task_update(pool, &job.id, "running", 10.0, "引擎健康检查").await.ok();
 
-    // 仅依赖 Python sidecar 的任务（影片 ASR/TTS）需先做连通性检查；
-    // 纯云 LLM 对话（chat）经 Rust reqwest 直连 Agnes，不依赖 sidecar（与 provider_test 一致）。
-    let needs_sidecar = matches!(
-        job.kind.as_str(),
-        "film_import" | "film_smart_cut" | "film_export"
-    );
-    if needs_sidecar {
-        let alive = python::health(client, port).await;
-        if !alive {
-            db::task_update(
-                pool,
-                &job.id,
-                "failed",
-                30.0,
-                "Python sidecar 未运行（影片 ASR/TTS 需要 sidecar；请检查 VF_PYTHON/VF_SIDECAR_DIR）",
-            )
-            .await
-            .ok();
-            emit(ProgressMsg {
-                task_id: job.id.clone(),
-                progress: 100.0,
-                status: "failed".into(),
-                message: Some("sidecar 未运行".into()),
-                payload: None,
-            });
-            return;
-        }
-        emit(ProgressMsg {
-            task_id: job.id.clone(),
-            progress: 60.0,
-            status: "running".into(),
-            message: Some("AI 引擎可达".into()),
-            payload: None,
-        });
-        db::task_update(pool, &job.id, "running", 60.0, "AI 引擎可达").await.ok();
-    }
+    // 全部任务均经 Rust reqwest 直连各云网关（Agnes 对话 / XiaomiMimo ASR·TTS），不再依赖 Python sidecar。
 
     match job.kind.as_str() {
         "chat" | "llm_chat" => {
@@ -260,7 +228,7 @@ async fn run_chat(pool: &SqlitePool, client: &Client, _port: u16, job: &TaskJob)
     });
     let resp = client
         .post(&url)
-        .bearer_auth(&key)
+        .bearer_auth(key.as_str())
         .json(&body)
         .timeout(std::time::Duration::from_secs(60))
         .send()
@@ -422,6 +390,120 @@ fn parse_asr_data(data: &Option<serde_json::Value>) -> (Vec<db::AsrSegment>, Str
 // M2：异步任务实现
 // ===========================================================================
 
+/// 语音识别（ASR）：直连 XiaomiMimo /chat/completions（OpenAI 兼容，音频以 base64 置于 messages.input_audio）。
+/// 返回 (segments, language, duration, degraded)。无 Key / 无音频 / 调用失败均降级（degraded=true），不阻塞导入。
+/// 注：XiaomiMimo ASR 仅返回整段文本（无逐句时间轴），故整段作为一个 segment 存储。
+async fn transcribe_asr(
+    pool: &SqlitePool,
+    client: &Client,
+    audio_path: &str,
+) -> (Vec<db::AsrSegment>, String, f64, bool) {
+    let row = match db::get_by_kind(pool, "asr").await {
+        Ok(r) => r,
+        Err(_) => return (Vec::new(), "zh".to_string(), 0.0, true),
+    };
+    let key = match cred::get_key("asr").ok().flatten() {
+        Some(k) if !k.is_empty() => k,
+        _ => return (Vec::new(), "zh".to_string(), 0.0, true),
+    };
+    let bytes = match std::fs::read(audio_path) {
+        Ok(b) => b,
+        Err(_) => return (Vec::new(), "zh".to_string(), 0.0, true),
+    };
+    let b64 = B64.encode(&bytes);
+    let base_url = row.base_url.trim_end_matches('/');
+    let body = serde_json::json!({
+        "model": row.model,
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "input_audio",
+                "input_audio": { "data": format!("data:audio/wav;base64,{b64}") }
+            }]
+        }],
+        "asr_options": { "language": "zh" },
+        "stream": false
+    });
+    let resp = match client
+        .post(format!("{base_url}/chat/completions"))
+        .bearer_auth(key.as_str())
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return (Vec::new(), "zh".to_string(), 0.0, true),
+    };
+    if !resp.status().is_success() {
+        return (Vec::new(), "zh".to_string(), 0.0, true);
+    }
+    let v: serde_json::Value = match resp.json().await {
+        Ok(j) => j,
+        Err(_) => return (Vec::new(), "zh".to_string(), 0.0, true),
+    };
+    let text = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+    if text.trim().is_empty() {
+        return (Vec::new(), "zh".to_string(), 0.0, true);
+    }
+    let seg = db::AsrSegment {
+        start: 0.0,
+        end: 0.0,
+        text,
+        confidence: 1.0,
+    };
+    (vec![seg], "zh".to_string(), 0.0, false)
+}
+
+/// 语音合成（TTS）：直连 XiaomiMimo /audio/speech（OpenAI 兼容，返回音频字节），写本地文件后返回路径。
+/// 无 Key / 调用失败返回 None（不混音，不影响导出主流程）。
+async fn synthesize_tts(
+    pool: &SqlitePool,
+    client: &Client,
+    script: &str,
+    project_id: &str,
+    tmp: &Path,
+) -> Option<std::path::PathBuf> {
+    let row = db::get_by_kind(pool, "tts").await.ok()?;
+    let key = cred::get_key("tts").ok().flatten().filter(|k| !k.is_empty())?;
+    let base_url = row.base_url.trim_end_matches('/');
+    let body = serde_json::json!({
+        "model": row.model,
+        "input": script,
+        "voice": "default"
+    });
+    let resp = client
+        .post(format!("{base_url}/audio/speech"))
+        .bearer_auth(key.as_str())
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let bytes = resp.bytes().await.ok()?;
+    let ext = match resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(ct) if ct.contains("wav") => "wav",
+        _ => "mp3",
+    };
+    let out_path = tmp.join(format!("tts_{project_id}.{ext}"));
+    std::fs::write(&out_path, &bytes).ok()?;
+    Some(out_path)
+}
+
 /// 导入对齐：抽音轨 → ASR（降级不阻塞）→ 对齐 → 存草稿时间线。
 async fn run_film_import(
     pool: &SqlitePool,
@@ -473,24 +555,11 @@ async fn run_film_import(
         payload: None,
     });
 
-    // ASR（降级：不可达/失败不阻塞导入）
+    // ASR（直连 XiaomiMimo /chat/completions，降级：不可达/失败不阻塞导入）
     let (segments, _language, _duration, degraded) = if audio_path.is_empty() {
         (Vec::new(), "zh".to_string(), 0.0, true)
     } else {
-        match db::get_by_kind(pool, "asr").await {
-            Ok(row) => {
-                let key = cred::get_key("asr").ok().flatten();
-                let cfg = python::build_cfg(&row, key);
-                match python::call_asr(client, port, &cfg, &audio_path, "zh").await {
-                    Ok(env) if env.ok => {
-                        let (segs, lang, dur) = parse_asr_data(&env.data);
-                        (segs, lang, dur, false)
-                    }
-                    _ => (Vec::new(), "zh".to_string(), 0.0, true),
-                }
-            }
-            Err(_) => (Vec::new(), "zh".to_string(), 0.0, true),
-        }
+        transcribe_asr(pool, client, &audio_path).await
     };
 
     let script_segs = segment_by_punctuation(&script);
@@ -770,20 +839,16 @@ async fn run_film_export(
             message: Some("生成配音并混音".into()),
             payload: None,
         });
-        if let Ok(row) = db::get_by_kind(pool, "tts").await {
-            let key = cred::get_key("tts").ok().flatten();
-            let cfg = python::build_cfg(&row, key);
-            if let Ok(env) = python::call_tts(client, port, &cfg, &script, "default").await {
-                if let Some(d) = &env.data {
-                    if let Some(vp) = d.get("audioPath").and_then(|v| v.as_str()) {
-                        let mixed = tmp.join("mixed.mp4");
-                        ff.mux_cmd(final_video.to_str().unwrap(), vp, mixed.to_str().unwrap())
-                            .output()
-                            .map_err(|e| e.to_string())?;
-                        final_video = mixed;
-                    }
-                }
-            }
+        if let Some(vp) = synthesize_tts(pool, client, &script, &project_id, &tmp).await {
+            let mixed = tmp.join("mixed.mp4");
+            ff.mux_cmd(
+                final_video.to_str().unwrap(),
+                vp.to_str().unwrap(),
+                mixed.to_str().unwrap(),
+            )
+            .output()
+            .map_err(|e| e.to_string())?;
+            final_video = mixed;
         }
     }
 
