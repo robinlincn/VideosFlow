@@ -58,9 +58,9 @@ export async function getProviderKey(kind: string): Promise<string | null> {
   return invoke<string | null>('provider_key_get', { kind });
 }
 
-/** 连接测试：填了真实 Key 时返回 'ok'，否则抛出可读错误。 */
-export async function testProvider(kind: string): Promise<string> {
-  return invoke<string>('provider_test', { kind });
+/** 连接测试：传入正在填写（未保存）的 Key 可直接测，否则回退到已保存的 Key。返回 'ok' 表示连通。 */
+export async function testProvider(kind: string, apiKey?: string): Promise<string> {
+  return invoke<string>('provider_test', { kind, apiKey: apiKey ?? null });
 }
 
 /** 提交任务并订阅进度（经 Tauri Channel 或浏览器伪通道）。 */

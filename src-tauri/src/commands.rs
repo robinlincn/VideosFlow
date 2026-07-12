@@ -24,38 +24,17 @@ pub async fn provider_list(state: State<'_, AppState>) -> Result<Vec<db::Provide
     Ok(rows)
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderUpsert {
-    pub kind: String,
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub provider: String,
-    #[serde(default)]
-    pub base_url: String,
-    #[serde(default)]
-    pub model: String,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-#[tauri::command]
-pub async fn provider_upsert(state: State<'_, AppState>, p: ProviderUpsert) -> Result<(), String> {
-    db::upsert(
-        &state.pool,
-        &p.kind,
-        &p.name,
-        &p.provider,
-        &p.base_url,
-        &p.model,
-        p.enabled,
-    )
-    .await
+#[tauri::command(rename_all = "camelCase")]
+pub async fn provider_upsert(
+    state: State<'_, AppState>,
+    kind: String,
+    name: String,
+    provider: String,
+    base_url: String,
+    model: String,
+    enabled: bool,
+) -> Result<(), String> {
+    db::upsert(&state.pool, &kind, &name, &provider, &base_url, &model, enabled).await
 }
 
 #[tauri::command]
@@ -70,50 +49,53 @@ pub async fn provider_key_get(kind: String) -> Result<Option<String>, String> {
 
 /// 连接测试：Rust 端直接用 reqwest 探测 Base URL 可达性 + 鉴权有效性，
 /// 不再依赖 Python sidecar（sidecar 仅在口播/创作模块运行时启用，设置页测试不应被其阻塞）。
-#[tauri::command]
-pub async fn provider_test(state: State<'_, AppState>, kind: String) -> Result<String, String> {
+/// `api_key` 为可选：传入时优先用「正在填写、尚未保存」的 Key 直接测，无需先点保存。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn provider_test(
+    state: State<'_, AppState>,
+    kind: String,
+    api_key: Option<String>,
+) -> Result<String, String> {
     let row = db::get_by_kind(&state.pool, &kind).await?;
-    let key = cred::get_key(&kind)?;
+    let stored = cred::get_key(&kind)?;
+    let key = api_key
+        .filter(|k| !k.is_empty())
+        .or_else(|| stored.filter(|k| !k.is_empty()));
     let base = row.base_url.trim().to_string();
     if base.is_empty() {
         return Err("请先填写 Base URL 再测试连接".into());
     }
     let client = &state.client;
-    let has_key = key.as_ref().map(|k| !k.is_empty()).unwrap_or(false);
+    let has_key = key.is_some();
     // 优先尝试 OpenAI 兼容的 /models 端点（可同时验证鉴权有效性）
     let models_url = format!("{}/models", base.trim_end_matches('/'));
     let mut req = client.get(&models_url).timeout(Duration::from_secs(8));
     if let Some(k) = &key {
-        if !k.is_empty() {
-            req = req.bearer_auth(k);
-        }
+        req = req.bearer_auth(k);
     }
     match req.send().await {
         Ok(resp) => {
-            let status = resp.status();
-            if status.is_success() {
+            let code = resp.status().as_u16();
+            if resp.status().is_success() {
                 return Ok("ok".into());
             }
-            let code = status.as_u16();
-            if (code == 401 || code == 403) && has_key {
-                return Err("地址可达，但 API Key 无效或未授权（HTTP 401/403）".into());
+            if code == 401 || code == 403 {
+                return Err(if has_key {
+                    "API Key 无效或未授权（HTTP 401/403），请检查密钥".into()
+                } else {
+                    "缺少 API Key，请先填写 Key 再测试连接".into()
+                });
             }
-            if code == 404 {
-                // /models 不被该网关支持，退回基础连通测试（地址可达即视为 ok）
-                return match client.get(&base).timeout(Duration::from_secs(8)).send().await {
-                    Ok(_) => Ok("ok".into()),
-                    Err(e) => Err(format!("无法连接到 {base}：{e}")),
-                };
-            }
-            return Err(format!("连接返回异常状态码 {code}"));
+            // 其他业务状态码（如 404/405/500）→ 退回基础连通性判定
         }
         Err(_) => {
-            // /models 探测网络层失败（网关可能不支持该路径），退回对根地址探测
-            match client.get(&base).timeout(Duration::from_secs(8)).send().await {
-                Ok(_) => Ok("ok".into()),
-                Err(e) => Err(format!("无法连接到 {base}：{e}")),
-            }
+            // /models 网络层失败（网关可能不支持该路径）→ 退回对根地址探测
         }
+    }
+    // 基础连通性：对根地址发请求，只要收到任何 HTTP 响应即视为可达
+    match client.get(&base).timeout(Duration::from_secs(8)).send().await {
+        Ok(_) => Ok("ok".into()),
+        Err(e) => Err(format!("无法连接到 {base}：{e}")),
     }
 }
 

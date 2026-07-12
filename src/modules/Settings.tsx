@@ -80,10 +80,11 @@ function ApiView() {
   const handleTest = async (k: string) => {
     actions.setProviderTest(k, 'testing');
     try {
-      const res = await ipcTestProvider(k);
+      const res = await ipcTestProvider(k, providers[k].apiKey);
       actions.setProviderTest(k, res === 'ok' ? 'ok' : 'fail');
     } catch (e) {
       actions.setProviderTest(k, 'fail');
+      actions.task(`测试 ${providers[k].name} 失败: ${String(e)}`, 100);
     }
   };
 
