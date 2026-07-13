@@ -37,3 +37,11 @@ python-sidecar/venv/
 __pycache__/
 *.pyc
 *.pyo
+
+# Claude Code / 本地工具缓存（非源码，不入库）
+.claude/
+.omc/
+src-tauri/.omc/
+
+# 流程图临时导出归档（非文档资产）
+docs/FlowImg/*.rar
