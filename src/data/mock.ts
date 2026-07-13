@@ -9,6 +9,9 @@ import type {
   TimelineEnvelope,
   FlowerTemplate,
   FilmExportOptions,
+  CreationProject,
+  Storyboard,
+  GeneratedAsset,
 } from '../ipc/types';
 
 export type ModuleKey = 'film' | 'spoken' | 'creation' | 'settings';
@@ -47,6 +50,22 @@ export interface SpokenIssue {
 }
 export interface SpokenAsset { name: string; type: 'image' | 'bgm' | 'sfx' | 'clip'; }
 export interface SpokenMatch { seg: string; text: string; kw: string; asset: string; applied: boolean; }
+
+/**
+ * M3：与 Rust SpokenVideoRow 字段对齐（camelCase）。
+ * 注：原 mock 中的 SpokenVideo（前端 UI 用）保留，使用 SpokenVideoDbRow 表示 DB 真实行。
+ */
+export interface SpokenVideoDbRow {
+  id: string;
+  name: string;
+  path: string;
+  duration: number;
+  transcript: string;        // JSON.stringify(AsrSegment[])
+  script: string;
+  cleanScript: string;
+  createdAt: number;
+}
+
 export interface SpokenVideo {
   id: string; name: string; dur: string;
   tr: { t: string; x: string }[];
@@ -58,7 +77,38 @@ export interface SpokenVideo {
   cleanScript: string | null;
 }
 
-export interface Shot { desc: string; dialogue: string; dur: number; cam: string; }
+/** M3：DB 同步类型 — 用于 spokenEdits / spokenAssets / spokenMatches 等数组元素。 */
+export interface SpokenEditDb {
+  id: string;
+  videoId: string;
+  issueType: 'gap' | 'mistake' | 'repeat';
+  start: number;
+  end: number;
+  text: string;
+  suggestion: string;
+  accepted: 0 | 1 | -1;
+}
+
+export interface SpokenAssetDb {
+  id: string;
+  videoId: string;
+  name: string;
+  type: 'image' | 'bgm' | 'sfx' | 'clip';
+  path: string;
+}
+
+export interface SpokenMatchDb {
+  id: string;
+  videoId: string;
+  segStart: number;
+  segEnd: number;
+  segText: string;
+  keyword: string;
+  assetId: string;
+  applied: boolean;
+}
+
+export interface Shot { index?: number; desc: string; dialogue: string; dur: number; cam: string; start?: number; end?: number; style?: string; }
 export interface VoiceSel { name: string; ip: string; }
 export interface RefImg { name: string; dataUrl: string; cat: string; }
 export interface CreationState {
@@ -288,9 +338,21 @@ export interface AppState {
   editorState: EditorState;
   spokenSel: string | null;
   spokenStage: string;
+  /** UI 形态（仅 dev fallback 与演示用） */
   spokenVideos: SpokenVideo[];
+  // M3：DB 真实形态（与 Rust SpokenVideoRow / SpokenEditRow 对齐，camelCase）
+  spokenVideosDb: SpokenVideoDbRow[];
+  spokenEdits: SpokenEditDb[];
+  spokenAssets: SpokenAssetDb[];
+  spokenKeywords: { id: string; videoId: string; text: string; weight: number }[];
+  spokenMatches: SpokenMatchDb[];
   cStage: string;
   cState: CreationState;
+  // M4：创作 DB 真实形态
+  creationProjects: CreationProject[];
+  creationSel: string | null;
+  creationSb: Storyboard | null;
+  creationAssets: GeneratedAsset[];
   settingsSub: string;
   settingsState: SettingsState;
 }

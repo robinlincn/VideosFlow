@@ -206,6 +206,54 @@ src/
 | 导出 MP4（**默认 libx264 软编码，可选硬件加速**） | `ffmpeg.rs` | M2 上 |
 **验收**：导入「素材+文案」→ 自动出粗剪时间线 → 精修 → 加花字 → 导出 MP4，文件可播放。
 
+**状态（M2 · 2026-07-12）**：✅ 已完成并 push。详见 `docs/m2-film-design.md` 与 README §十一·补。
+
+#### M3 — 口播模块
+| 任务 | 文件 | 依赖 |
+|------|------|------|
+| 类型扩展：spoken_videos / spoken_edits / spoken_assets / spoken_keywords / spoken_matches 五表 CRUD | `db.rs`, `commands.rs` | M0 |
+| 上传（tauri-plugin-dialog）+ ASR 任务（复用 M2 transcribe_asr） | `commands.rs`, `tasks.rs` | M1 |
+| 文案提取（标点切 + 去填充词） | `tasks.rs` | M2 |
+| 检测任务：gap(FFmpeg silencedetect) + repeat(Rust 编辑距离) + mistake(Agnes LLM) | `tasks.rs` | M1 |
+| 采纳/忽略交互 + 干净文案生成（不破坏原片） | `commands.rs`, `tasks.rs` | M3 上 |
+| 关键词抽取（Agnes LLM → TF-IDF Rust 兜底） | `tasks.rs` | M1 |
+| 素材匹配（贪心：image > clip > bgm > sfx） | `tasks.rs` | M3 上 |
+| 花字烧录（复用 M2 `build_ass` + `burn_ass_cmd`） | `tasks.rs` | M2 |
+| 干净片段导出（基于原片裁剪：accepted edits 切片段 + concat + 可选烧录） | `tasks.rs` | M2 |
+| 剪映工程导出（前端构造 `draft_content.json` + 下载） | `AppContext.tsx`, `lib/jianying.ts` | — |
+| 前端 Spoken.tsx 重构（5 步接真实 IPC）+ mock 同步 | `modules/Spoken.tsx`, `ipc/{client,providers,types}.ts` | — |
+
+**状态（M3 · 2026-07-13）**：✅ 已完成 T1-T7 全部代码落地；Rust `cargo check` 与前端 `npm run build` 零错误通过；设计与决策见 `docs/m3-spoken-design.md`。
+
+**已确认决策**（2026-07-13）：
+- 重复检测：Rust 端编辑距离法（确定性，零网络）
+- mistake 检测：纯 Agnes LLM（失败降级静默）
+- 干净片段导出：基于原片裁剪（segment + concat，无重编码）
+- 关键词降级：TF-IDF（Rust ngram）兜底
+- 素材上传：真实文件落盘 + 扩展名自动嗅探
+
+#### M4 — 创作上（需求→分镜→图片）
+| 任务 | 文件 | 依赖 |
+|------|------|------|
+| 类型扩展：creation_projects / storyboards / generated_assets 三表 CRUD（schema 已建） | `db.rs` | M0 |
+| 文案任务：script_write 走 Agnes LLM `script` 提示词 | `tasks.rs` | M1 |
+| 去 AI 味：script_humanize 走 Agnes `humanize` 提示词 | `tasks.rs` | M1 |
+| 分镜生成：storyboard_gen 走 Agnes `storyboard` 提示词 + JSON 解析 | `tasks.rs` | M1 |
+| 图片生成：image_gen 走 Agnes `/images/generations`（base64 写本地 + DB） | `tasks.rs` | M1 |
+| 风格约束卡：6 套沿用（现实/科幻/卡通/写实/动漫/水彩） | （复用 M3 `stylePresets`） | M3 |
+| 一致性抽检：粗筛（文件大小 5KB-5MB）+ UI 横向对比 | （前端 UI） | — |
+| 前端 Creation.tsx 重构（5 步接真实 IPC）+ mock 同步 | `modules/Creation.tsx`、`ipc/{client,providers,types}.ts` | — |
+
+**状态（M4 · 2026-07-13）**：✅ 已完成 T1-T6 全部代码落地；Rust `cargo check` 与前端 `npm run build` 零错误通过；设计与决策见 `docs/m4-creation-design.md`。
+
+**已确认决策**（2026-07-13）：
+- 图像 Provider：沿用 Agnes `/images/generations`（`agnes-image-2.1-flash`）
+- 风格约束卡：6 套沿用（与 M3 一致）
+- 一致性抽检：粗筛（文件大小）+ UI 横向对比
+- 图片失败降级：任务 failed + UI 允许单镜重试
+
+#### M5 — 创作下（视频→配音→导出）
+
 #### M3 — 口播模块
 | 任务 | 文件 | 依赖 |
 |------|------|------|

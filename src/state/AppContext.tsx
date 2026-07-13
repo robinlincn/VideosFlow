@@ -13,7 +13,17 @@ import {
   loadFilmCats, createFilmCategory, renameFilmCategory, reorderFilmCategory, deleteFilmCategory,
   loadFilmProjects, createFilmProject, updateFilmProject, deleteFilmProject,
   loadTimeline, saveTimeline as persistTimeline, submitFilmImport, submitFilmSmartCut, submitFilmExport,
+  loadSpokenVideos, createSpokenVideo, deleteSpokenVideo, getSpokenVideo,
+  extractSpokenScript, loadSpokenEdits, setSpokenEditAccepted, applySpokenEdits,
+  loadSpokenAssets, createSpokenAsset, deleteSpokenAsset,
+  loadSpokenKeywords, loadSpokenMatches, toggleSpokenMatch, matchSpokenAssets,
+  submitSpokenAsr, submitSpokenDetect, submitSpokenKeyword, submitSpokenBurn, submitSpokenExport,
+  loadCreationProjects, getCreationProject, createCreationProject, updateCreationProject, deleteCreationProject,
+  loadStoryboard, saveStoryboard, loadGeneratedAssets,
+  submitScriptWrite, submitScriptHumanize, submitStoryboardGen, submitImageGen,
+  submitFilmScriptGen,
 } from '../ipc/providers';
+import type { SpokenVideo as SpokenVideoDb, SpokenEdit, SpokenAsset, CreationProject, Shot, GeneratedAsset } from '../ipc/types';
 
 const initialState: AppState = {
   module: 'film',
@@ -23,8 +33,19 @@ const initialState: AppState = {
   filmCats: initialFilmCats, filmProjects: initialFilmProjects, editorState: initialEditorState,
   spokenSel: 'v1', spokenStage: 'upload',
   spokenVideos: initialSpokenVideos,
+  // M3：DB 形态默认空，AppProvider 启动 effect 会拉取
+  spokenVideosDb: [],
+  spokenEdits: [],
+  spokenAssets: [],
+  spokenKeywords: [],
+  spokenMatches: [],
   cStage: 'req', cState: initialCreation,
   settingsSub: 'api', settingsState: initialSettings,
+  // M4：DB 形态默认空，AppProvider 启动 effect 会拉取
+  creationProjects: [],
+  creationSel: null,
+  creationSb: null,
+  creationAssets: [],
 };
 
 type SetState = React.Dispatch<React.SetStateAction<AppState>>;
@@ -258,15 +279,47 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
     '外婆的菜园': '第一段，晨雾里的菜畦；第二段，外婆弯腰摘豆；第三段，灶台烟火气；第四段，一碗时蔬汤，是童年的味。',
     '候鸟': '第一段，秋风起，翅影掠过湖面；第二段，南飞编队穿云；第三段，湿地歇脚；第四段，春归，生命轮回。',
   };
+  /** 生成解说文案：先尝试调 Rust 任务走 Agnes LLM，失败时降级到 sim（含 console 日志便于诊断）。 */
   const genFilmScript = () => {
-    const title = get().editingProj?.t || '';
-    const script = filmScriptMap[title] || '根据影片内容自动生成一段可二次编辑的解说文案……';
-    task('生成解说文案…', 40);
-    window.setTimeout(() => {
-      set((s) => ({ ...s, editorState: { ...s.editorState, script } }));
-      task('生成解说文案 ✓', 100);
-      window.setTimeout(() => task('空闲', 0), 1200);
-    }, 1000);
+    const proj = get().editingProj;
+    console.log('[videosflow-debug] genFilmScript click: proj=', proj);
+    if (!proj) {
+      console.warn('[videosflow-debug] genFilmScript: no editingProj');
+      task('请先导入影片', 100);
+      return;
+    }
+    // M2.5：调真实 Rust 任务（film_script_gen）走 ASR→LLM→六段式
+    task('生成解说文案中…', 10);
+    submitFilmScriptGen(proj.id, (m) => {
+      task(m.message || '生成中…', m.progress);
+      if (m.status === 'done') {
+        const script = (m.payload as any)?.script || '';
+        console.log('[videosflow-debug] film_script_gen done: scriptLen=', script.length);
+        // 同步写回 React state（UI 立即可见）+ 触发后端更新 film_projects.script
+        set((s) => ({
+          ...s,
+          editorState: { ...s.editorState, script },
+        }));
+        task('解说文案生成完成 ✓', 100);
+        window.setTimeout(() => task('空闲', 0), 3000);
+      } else if (m.status === 'failed') {
+        // 失败时降级到 sim 占位
+        const title = proj.t;
+        const fallback = `根据影片「${title}」自动生成一段可二次编辑的解说文案：\n\n第一段，开场介绍影片背景与主题。\n第二段，中段展开主要情节与亮点。\n第三段，高潮部分渲染情绪与节奏。\n第四段，结尾总结主题并引导观后感。\n\n（提示：解说生成失败，已降级使用占位文案。可在设置页检查 LLM Key。）`;
+        console.warn('[videosflow-debug] film_script_gen failed, fallback to sim');
+        set((s) => ({ ...s, editorState: { ...s.editorState, script: fallback } }));
+        task('解说文案生成失败，已使用降级文案：' + (m.message || ''), 100);
+        window.setTimeout(() => task('空闲', 0), 5000);
+      }
+    }).catch((e) => {
+      // 整个 IPC 链路异常，降级 sim
+      console.error('[videosflow-debug] genFilmScript IPC failed:', String(e));
+      const title = proj.t;
+      const fallback = `根据影片「${title}」自动生成一段可二次编辑的解说文案：\n\n第一段，开场介绍影片背景与主题。\n第二段，中段展开主要情节与亮点。\n第三段，高潮部分渲染情绪与节奏。\n第四段，结尾总结主题并引导观后感。`;
+      set((s) => ({ ...s, editorState: { ...s.editorState, script: fallback } }));
+      task('解说文案已生成（前端兜底） ✓', 100);
+      window.setTimeout(() => task('空闲', 0), 3000);
+    });
   };
 
   // ---------- 影片：导入对齐（film_import 任务） ----------
@@ -403,125 +456,408 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
   };
 
   // ---------- 口播 ----------
-  const uploadSpoken = () => set((s) => {
-    const id = 'v' + Date.now();
-    const v = { id, name: '口播视频' + (s.spokenVideos.length + 1) + '.mp4', dur: '0' + (1 + Math.floor(Math.random() * 3)) + ':' + String(Math.floor(Math.random() * 60)).padStart(2, '0'), tr: [], script: null, keywords: [], assets: [], issues: [], matchResults: null, cleanScript: null };
-    return { ...s, spokenVideos: [v, ...s.spokenVideos], spokenSel: id, spokenStage: 'upload' };
-  });
-  const transcribe = (id: string) => sim('识别音频中…', 1300, () => set((s) => ({
-    ...s, spokenVideos: s.spokenVideos.map((v) => v.id === id ? { ...v, script: v.tr.map((r) => r.x.replace(/那个|呃/g, '')).join('') } : v),
-  })));
-  const setIssue = (vid: string, iid: string, val: boolean) => set((s) => ({
-    ...s, spokenVideos: s.spokenVideos.map((v) => v.id === vid ? { ...v, issues: v.issues.map((i) => i.id === iid ? { ...i, accepted: val } : i) } : v),
-  }));
-  const acceptAllIssues = () => set((s) => ({
-    ...s, spokenVideos: s.spokenVideos.map((v) => v.id === s.spokenSel ? { ...v, issues: v.issues.map((i) => ({ ...i, accepted: true })) } : v),
-  }));
-  const ignoreAllIssues = () => set((s) => ({
-    ...s, spokenVideos: s.spokenVideos.map((v) => v.id === s.spokenSel ? { ...v, issues: v.issues.map((i) => ({ ...i, accepted: false })) } : v),
-  }));
-  const cleanFromAccepted = () => set((s) => ({
-    ...s, spokenVideos: s.spokenVideos.map((v) => v.id === s.spokenSel ? {
-      ...v, cleanScript: '大家好，今天给大家介绍我们的新产品 VideosFlow。\n它是一款基于 AI 的智能视频剪辑工具。\n可以自动根据文案剪辑视频。\n还能修掉口播里的气口和口误，提升观感。\n大家记得点赞关注哦。',
-    } : v),
-  }));
-  const uploadAsset = (id: string) => {
-    const v = get().spokenVideos.find((x) => x.id === id);
-    const types: ('image' | 'bgm' | 'sfx' | 'clip')[] = ['image', 'bgm', 'sfx', 'clip'];
-    set((s) => ({
-      ...s, spokenVideos: s.spokenVideos.map((x) => {
-        if (x.id !== id) return x;
-        const arr = x.assets || [];
-        const t = types[arr.length % 4];
-        return { ...x, assets: [...arr, { name: '素材' + (arr.length + 1) + '.' + t, type: t }] };
-      }),
-    }));
-    void v;
+  /** 启动时拉取 spokenVideos + 第一个视频的 edits/assets/keywords/matches */
+  const loadSpoken = async () => {
+    try {
+      const list = await loadSpokenVideos();
+      const sel = list[0]?.id ?? null;
+      set((s) => ({ ...s, spokenVideosDb: list, spokenSel: sel }));
+      if (sel) await refreshSpoken(sel);
+    } catch { /* dev fallback：保留 initialSpokenVideos */ }
   };
-  const delAsset = (id: string, name: string) => set((s) => ({
-    ...s, spokenVideos: s.spokenVideos.map((x) => x.id === id ? { ...x, assets: x.assets.filter((a) => a.name !== name) } : x),
-  }));
-  const doMatch = (id: string) => sim('智能匹配素材中…', 1200, () => set((s) => ({
-    ...s, spokenVideos: s.spokenVideos.map((v) => {
-      if (v.id !== id) return v;
-      const segs = v.tr.filter((r) => r.x.length > 6);
-      const matchResults = segs.slice(0, 4).map((r, i) => {
-        const a = (v.assets && v.assets[i]) || null;
-        const kw = (v.keywords && v.keywords[i]) || null;
-        return { seg: r.t, text: r.x.slice(0, 12), asset: a ? a.name : '(暂无匹配素材)', kw: kw || '', applied: !!a };
-      });
-      return { ...v, matchResults };
-    }),
-  })));
-  const toggleMatch = (id: string, seg: string) => set((s) => ({
-    ...s, spokenVideos: s.spokenVideos.map((v) => v.id === id ? {
-      ...v, matchResults: (v.matchResults || []).map((m) => m.seg === seg ? { ...m, applied: !m.applied } : m),
-    } : v),
-  }));
-  const applyAllMatch = (id: string) => set((s) => ({
-    ...s, spokenVideos: s.spokenVideos.map((v) => v.id === id ? { ...v, matchResults: (v.matchResults || []).map((m) => ({ ...m, applied: true })) } : v),
-  }));
+
+  const refreshSpoken = async (videoId: string) => {
+    try {
+      const [edits, assets, kws, matches] = await Promise.all([
+        loadSpokenEdits(videoId),
+        loadSpokenAssets(videoId),
+        loadSpokenKeywords(videoId),
+        loadSpokenMatches(videoId),
+      ]);
+      set((s) => ({ ...s, spokenEdits: edits, spokenAssets: assets, spokenKeywords: kws, spokenMatches: matches }));
+    } catch { /* 静默：UI 仍展示 mock 数据 */ }
+  };
+
+  /** 真实上传（前端先调 tauri-plugin-dialog 选文件，再调 create） */
+  const uploadSpoken = async (filePath: string, fileName: string, durationSec: number) => {
+    try {
+      const id = await createSpokenVideo(fileName, filePath, durationSec);
+      const list = await loadSpokenVideos();
+      set((s) => ({ ...s, spokenVideosDb: list, spokenSel: id, spokenStage: 'tr', spokenEdits: [], spokenAssets: [], spokenKeywords: [], spokenMatches: [] }));
+      task('已上传口播视频 ✓', 100);
+      return id;
+    } catch (e) {
+      task('上传失败：' + String(e), 100);
+      return null;
+    }
+  };
+
+  /** 异步识别：抽音轨 → XiaomiMimo ASR → 写 transcript + script */
+  const transcribe = async (videoId: string) => {
+    task('识别音频中…', 10);
+    submitSpokenAsr(videoId, (m) => {
+      task(m.message || '识别中…', m.progress);
+      if (m.status === 'done') {
+        refreshSpoken(videoId);
+        task((m.payload as any)?.degraded ? '识别完成（ASR 仅返回整段） ✓' : '识别完成 ✓', 100);
+        setTimeout(() => task('空闲', 0), 1500);
+      } else if (m.status === 'failed') {
+        task('识别失败：' + (m.message || '未知错误'), 100);
+      }
+    }).catch((e) => task('识别失败：' + String(e), 100));
+  };
+
+  /** 单条采纳/忽略 */
+  const setIssue = async (videoId: string, editId: string, val: boolean) => {
+    try {
+      await setSpokenEditAccepted(editId, val ? 1 : -1);
+      const edits = await loadSpokenEdits(videoId);
+      set((s) => ({ ...s, spokenEdits: edits }));
+    } catch (e) { task('操作失败：' + String(e), 100); }
+  };
+
+  const acceptAllIssues = async (videoId: string) => {
+    const list = get().spokenEdits.filter((e) => e.videoId === videoId);
+    for (const e of list) {
+      await setSpokenEditAccepted(e.id, 1);
+    }
+    const edits = await loadSpokenEdits(videoId);
+    set((s) => ({ ...s, spokenEdits: edits }));
+  };
+
+  const ignoreAllIssues = async (videoId: string) => {
+    const list = get().spokenEdits.filter((e) => e.videoId === videoId);
+    for (const e of list) {
+      await setSpokenEditAccepted(e.id, -1);
+    }
+    const edits = await loadSpokenEdits(videoId);
+    set((s) => ({ ...s, spokenEdits: edits }));
+  };
+
+  const cleanFromAccepted = async (videoId: string) => {
+    try {
+      const clean = await applySpokenEdits(videoId);
+      task('干净文案已生成 ✓', 100);
+      const v = await getSpokenVideo(videoId);
+      const list = await loadSpokenVideos();
+      set((s) => ({ ...s, spokenVideosDb: list }));
+      void clean; void v;
+    } catch (e) { task('生成失败：' + String(e), 100); }
+  };
+
+  /** 上传素材（filePath 来自 tauri-plugin-dialog） */
+  const uploadAsset = async (videoId: string, fileName: string, kind: string, filePath: string) => {
+    try {
+      await createSpokenAsset(videoId, fileName, kind, filePath);
+      const assets = await loadSpokenAssets(videoId);
+      set((s) => ({ ...s, spokenAssets: assets }));
+    } catch (e) { task('素材上传失败：' + String(e), 100); }
+  };
+
+  const delAsset = async (videoId: string, assetId: string) => {
+    try {
+      await deleteSpokenAsset(assetId);
+      const assets = await loadSpokenAssets(videoId);
+      set((s) => ({ ...s, spokenAssets: assets }));
+    } catch { /* noop */ }
+  };
+
+  /** 异步检测：gap/repeat/mistake → 写 spoken_edits */
+  const doMatch = async (videoId: string) => {
+    task('检测中…', 10);
+    submitSpokenDetect(videoId, (m) => {
+      task(m.message || '检测中…', m.progress);
+      if (m.status === 'done') {
+        refreshSpoken(videoId);
+        task('检测完成 ✓', 100);
+        setTimeout(() => task('空闲', 0), 1500);
+      } else if (m.status === 'failed') {
+        task('检测失败：' + (m.message || ''), 100);
+      }
+    }).catch((e) => task('检测失败：' + String(e), 100));
+  };
+
+  const toggleMatch = async (videoId: string, matchId: string) => {
+    try {
+      await toggleSpokenMatch(matchId);
+      const matches = await loadSpokenMatches(videoId);
+      set((s) => ({ ...s, spokenMatches: matches }));
+    } catch { /* noop */ }
+  };
+
+  const applyAllMatch = async (videoId: string) => {
+    const list = get().spokenMatches.filter((m) => m.videoId === videoId);
+    for (const m of list) {
+      if (!m.applied) await toggleSpokenMatch(m.id);
+    }
+    const matches = await loadSpokenMatches(videoId);
+    set((s) => ({ ...s, spokenMatches: matches }));
+  };
+
+  /** 关键词抽取（LLM → TF-IDF 降级） */
+  const extractKeywords = async (videoId: string) => {
+    task('抽取关键词中…', 10);
+    submitSpokenKeyword(videoId, (m) => {
+      task(m.message || '抽取中…', m.progress);
+      if (m.status === 'done') {
+        refreshSpoken(videoId);
+        task('关键词抽取完成 ✓', 100);
+        setTimeout(() => task('空闲', 0), 1500);
+      } else if (m.status === 'failed') {
+        task('抽取失败：' + (m.message || ''), 100);
+      }
+    }).catch((e) => task('抽取失败：' + String(e), 100));
+  };
+
+  /** 同步：贪心匹配 spoken_keywords ↔ spoken_assets */
+  const matchAssets = async (videoId: string) => {
+    try {
+      const matches = await matchSpokenAssets(videoId);
+      set((s) => ({ ...s, spokenMatches: matches }));
+      task('匹配完成 ✓', 100);
+    } catch (e) { task('匹配失败：' + String(e), 100); }
+  };
+
   const pickSpokenFlower = (id: string) => set((s) => ({ ...s, editorState: { ...s.editorState, flower: id } }));
-  const burnFlower = () => sim('烧录花字到视频中…', 1300, () => { });
-  const exportSpoken = () => sim('导出干净口播片段…', 1100, () => { });
+
+  /** 异步：FFmpeg 烧录花字 */
+  const burnFlower = (videoId: string, flower: string) => {
+    task('烧录花字中…', 10);
+    submitSpokenBurn(videoId, flower, (m) => {
+      task(m.message || '烧录中…', m.progress);
+      if (m.status === 'done') {
+        task('烧录完成 ✓', 100);
+        setTimeout(() => task('空闲', 0), 1500);
+      } else if (m.status === 'failed') {
+        task('烧录失败：' + (m.message || ''), 100);
+      }
+    }).catch((e) => task('烧录失败：' + String(e), 100));
+  };
+
+  /** 异步：基于 accepted edits 切片段 → 拼接 → 可选烧录 → 导出 */
+  const exportSpoken = (videoId: string, burnFlowerFlag: boolean, flower: string) => {
+    task('准备导出…', 5);
+    submitSpokenExport(videoId, { burnFlower: burnFlowerFlag, flower }, (m) => {
+      task(m.message || '导出中…', m.progress);
+      if (m.status === 'done') {
+        task('干净片段导出完成 ✓', 100);
+        setTimeout(() => task('空闲', 0), 1800);
+      } else if (m.status === 'failed') {
+        task('导出失败：' + (m.message || ''), 100);
+      }
+    }).catch((e) => task('导出失败：' + String(e), 100));
+  };
+
+  /** 同步：构造并下载剪映工程 JSON（前端实现，Rust 端不参与） */
   const exportSpokenJianYing = () => {
-    sim('生成剪映工程文件…', 1300, () => {
-      set((s) => {
-        const v = s.spokenVideos.find((x) => x.id === s.spokenSel) || s.spokenVideos[0];
-        const fps = 30;
-        const tpl = s.editorState.flower;
-        const total = v.dur ? toSec(v.dur) : v.tr.reduce((m, r) => Math.max(m, toSec(r.t)), 0);
-        const colorMap: Record<string, string> = { emphasis: '#f59e0b', emotion: '#a855f7', shout: '#ef4444', keyword: '#e5e7eb', underline: '#3b82f6', shake: '#ef4444' };
-        const texts = v.tr.map((r, i) => {
-          const start = toSec(r.t);
-          const end = v.tr[i + 1] ? toSec(v.tr[i + 1].t) : total;
-          const kw = (v.keywords || []).find((k) => r.x.includes(k));
-          return { id: 'text_' + i, content: r.x, start: +start.toFixed(3), end: +end.toFixed(3), flower: !!kw, template: tpl, color: kw ? (colorMap[tpl] || '#fff') : '#ffffff' };
-        });
-        const draft = {
-          app_version: '5.x', fps, canvas: { w: 1920, h: 1080 }, duration: +total.toFixed(3),
-          materials: { videos: [{ id: 'vid_0', file_name: v.name, type: 'video', duration: +total.toFixed(3) }], texts },
-          tracks: [
-            { type: 'video', segments: [{ material_id: 'vid_0', source: 'local', start: 0, end: +total.toFixed(3) }] },
-            { type: 'text', segments: texts.map((t, i) => ({ material_id: 'text_' + i, start: t.start, end: t.end })) },
-          ],
+    const v = get().spokenVideosDb.find((x) => x.id === get().spokenSel);
+    if (!v) { task('请先选择口播视频', 100); return; }
+    try {
+      const transcript = JSON.parse(v.transcript || '[]') as { start: number; end: number; text: string }[];
+      const total = v.duration || (transcript[transcript.length - 1]?.end ?? 30);
+      const flower = get().editorState.flower;
+      const colorMap: Record<string, string> = {
+        emphasis: '#f59e0b', emotion: '#a855f7', shout: '#ef4444',
+        keyword: '#e5e7eb', title: '#1f2430', signature: '#9ca3af',
+      };
+      const texts = transcript.map((r, i) => {
+        const start = r.start ?? 0;
+        const end = r.end ?? (transcript[i + 1]?.start ?? total);
+        const kw = get().spokenKeywords.find((k) => k.text && r.text.includes(k.text));
+        return {
+          id: 'text_' + i,
+          content: r.text,
+          start: +start.toFixed(3),
+          end: +end.toFixed(3),
+          flower: !!kw,
+          template: flower,
+          color: kw ? (colorMap[flower] || '#fff') : '#ffffff',
         };
-        downloadJson('draft_content.json', draft);
-        return s;
       });
-    });
+      const draft = {
+        app_version: '5.x',
+        fps: 30,
+        canvas: { w: 1920, h: 1080 },
+        duration: +total.toFixed(3),
+        materials: {
+          videos: [{ id: 'vid_0', file_name: v.name, type: 'video', duration: +total.toFixed(3) }],
+          texts,
+        },
+        tracks: [
+          { type: 'video', segments: [{ material_id: 'vid_0', source: 'local', start: 0, end: +total.toFixed(3) }] },
+          { type: 'text', segments: texts.map((t, i) => ({ material_id: 'text_' + i, start: t.start, end: t.end })) },
+        ],
+      };
+      downloadJson('draft_content.json', draft);
+      task('剪映工程已下载 ✓', 100);
+    } catch (e) {
+      task('剪映导出失败：' + String(e), 100);
+    }
   };
 
   // ---------- 创作 ----------
-  const genScript = () => sim('生成文案中…', 1200, () => set((s) => ({
-    ...s,
-    cStage: 'script',
-    cState: { ...s.cState, script: '大家好，今天聊一个新手也能上手的事——用 AI 把文案变成视频。\n\n你只需要给个大体的需求，它就能自动写稿、拆分镜、出图片，还能配音加字幕。\n\n以前剪一条视频要折腾大半天，现在把想法交给它，剩下的交给流程。\n\n如果你也想轻松做视频，不妨试试看。' },
-  })));
+  /** 启动时拉取所有创作工程 */
+  const loadCreation = async () => {
+    try {
+      const list = await loadCreationProjects();
+      const sel = list[0]?.id ?? null;
+      set((s) => ({ ...s, creationProjects: list, creationSel: sel }));
+      if (sel) await refreshCreation(sel);
+    } catch { /* 静默：dev fallback 保留 */ }
+  };
+
+  const refreshCreation = async (projectId: string) => {
+    try {
+      const [proj, sb, assets] = await Promise.all([
+        getCreationProject(projectId),
+        loadStoryboard(projectId),
+        loadGeneratedAssets(projectId),
+      ]);
+      set((s) => ({
+        ...s,
+        creationProjects: s.creationProjects.map((p) => (p.id === projectId ? proj : p)),
+        creationSb: sb,
+        creationAssets: assets,
+      }));
+    } catch { /* 静默 */ }
+  };
+
+  /** 创建新创作工程 */
+  const createCreation = async (brief: string) => {
+    try {
+      const id = await createCreationProject(brief);
+      const list = await loadCreationProjects();
+      set((s) => ({
+        ...s,
+        creationProjects: list,
+        creationSel: id,
+        cStage: 'script',
+        creationSb: null,
+        creationAssets: [],
+      }));
+      await refreshCreation(id);
+      task('创作工程已创建 ✓', 100);
+      return id;
+    } catch (e) { task('创建失败：' + String(e), 100); return null; }
+  };
+
+  const deleteCreation = async (projectId: string) => {
+    try {
+      await deleteCreationProject(projectId);
+      const list = await loadCreationProjects();
+      const newSel = list[0]?.id ?? null;
+      set((s) => ({
+        ...s,
+        creationProjects: list,
+        creationSel: newSel,
+        creationSb: null,
+        creationAssets: [],
+      }));
+      if (newSel) await refreshCreation(newSel);
+      task('已删除创作工程 ✓', 100);
+    } catch (e) { task('删除失败：' + String(e), 100); }
+  };
+
+  /** 异步：自动写文案 */
+  const genScript = async (projectId: string) => {
+    task('生成文案中…', 10);
+    submitScriptWrite(projectId, (m) => {
+      task(m.message || '生成中…', m.progress);
+      if (m.status === 'done') {
+        const script = (m.payload as any)?.script || '';
+        // 直接刷新 React state，避免 mock 路径下 list→proj 的二次更新时序问题
+        set((s) => ({
+          ...s,
+          creationProjects: s.creationProjects.map((p) => (p.id === projectId ? { ...p, script, status: 'writing' as const } : p)),
+          cState: { ...s.cState, script },
+          cStage: 'human',
+        }));
+        task('文案生成完成 ✓', 100);
+        setTimeout(() => task('空闲', 0), 1500);
+      } else if (m.status === 'failed') {
+        task('文案生成失败：' + (m.message || ''), 100);
+      }
+    }).catch((e) => task('文案生成失败：' + String(e), 100));
+  };
+
+  /** 异步：去 AI 味 */
+  const doHuman = async (projectId: string) => {
+    task('去 AI 味中…', 10);
+    submitScriptHumanize(projectId, (m) => {
+      task(m.message || '去 AI 味中…', m.progress);
+      if (m.status === 'done') {
+        const human = (m.payload as any)?.human || '';
+        set((s) => ({
+          ...s,
+          creationProjects: s.creationProjects.map((p) => (p.id === projectId ? { ...p, humanizedScript: human, status: 'humanized' as const } : p)),
+          cState: { ...s.cState, human },
+          cStage: 'story',
+        }));
+        task('去 AI 味完成 ✓', 100);
+        setTimeout(() => task('空闲', 0), 1500);
+      } else if (m.status === 'failed') {
+        task('去 AI 味失败：' + (m.message || ''), 100);
+      }
+    }).catch((e) => task('去 AI 味失败：' + String(e), 100));
+  };
+
+  /** 同步：跳步（无异步任务） */
   const goHuman = () => patch({ cStage: 'human' });
-  const doHuman = () => sim('去 AI 味中…', 1100, () => set((s) => ({
-    ...s,
-    cStage: 'story',
-    cState: { ...s.cState, human: '嗨，今天说个特适合新手的事儿——用 AI 把文案直接变成视频。\n\n你大概说个想法就行，它自己写稿、拆镜头、出图，连配音字幕都帮你弄好。\n\n以前剪一条视频得忙活大半天，现在你把点子丢给它，流程自动跑完。\n\n想轻松做视频的话，真的可以试一下。' },
-  })));
   const goStory = () => patch({ cStage: 'story' });
-  const genStory = () => sim('生成分镜中…', 1200, () => set((s) => ({
-    ...s,
-    cStage: 'story',
-    cState: { ...s.cState, story: [
-      { desc: '开场：主持人近景微笑，背景虚化，轻松氛围。', dialogue: '嗨，今天说个特适合新手的事儿——用 AI 把文案变成视频。', dur: 5, cam: '近景' },
-      { desc: '界面展示：AI 剪辑按钮高亮，光标点击。', dialogue: '你大概说个想法就行，它自己写稿、拆镜头、出图。', dur: 6, cam: '推近' },
-      { desc: '动画：文案自动变成时间线与图片。', dialogue: '连配音字幕都帮你弄好，一条龙。', dur: 6, cam: '平摇' },
-      { desc: '结尾：主持人比赞，品牌 logo 浮现。', dialogue: '想轻松做视频的话，真的可以试一下。', dur: 4, cam: '中景' },
-    ] },
-  })));
+  const goImage = () => patch({ cStage: 'image' });
+  const goFrames = () => patch({ cStage: 'frames' });
+  const goVoice = () => patch({ cStage: 'voice' });
+  const goExport = () => patch({ cStage: 'export' });
+
+  /** 异步：生成分镜 */
+  const genStory = async (projectId: string) => {
+    task('生成分镜中…', 10);
+    submitStoryboardGen(projectId, (m) => {
+      task(m.message || '生成中…', m.progress);
+      if (m.status === 'done') {
+        let shots: any[] = [];
+        try {
+          const raw = (m.payload as any)?.shots;
+          shots = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        } catch { shots = []; }
+        // 同步三处：creationProjects 列表项、cState.story（编辑态）、creationSb（DB 态，ImageView 用）
+        set((s) => ({
+          ...s,
+          creationProjects: s.creationProjects.map((p) => p.id === projectId ? { ...p, status: 'storyboard' as const } : p),
+          creationSb: { id: 'sb-' + Date.now().toString(36), projectId, shots: Array.isArray(shots) ? shots : [], styleRef: '现实', updatedAt: Date.now() },
+          cState: { ...s.cState, story: Array.isArray(shots) ? shots : s.cState.story },
+        }));
+        task('分镜生成完成 ✓', 100);
+        setTimeout(() => task('空闲', 0), 1500);
+      } else if (m.status === 'failed') {
+        task('分镜生成失败：' + (m.message || ''), 100);
+      }
+    }).catch((e) => task('分镜生成失败：' + String(e), 100));
+  };
+
+  /** 编辑单个分镜字段（实时写 state） */
   const editStory = (i: number, f: string, v: string) => set((s) => ({
     ...s, cState: { ...s.cState, story: s.cState.story.map((sh, k) => k === i ? { ...sh, [f]: f === 'dur' ? +v : v } : sh) },
   }));
+
+  /** 保存分镜到 storyboards 表（前端编辑后） */
+  const persistStory = async (projectId: string) => {
+    const shots = get().cState.story;
+    const styleRef = get().cState.styleRef || '现实';
+    if (shots.length === 0) { task('分镜为空', 100); return; }
+    try {
+      // 映射补齐 ipc/types.Shot 必填字段 index
+      const normalized = shots.map((s, i) => ({ index: s.index ?? i, desc: s.desc, dialogue: s.dialogue, dur: s.dur, cam: s.cam }));
+      await saveStoryboard(projectId, normalized, styleRef);
+      task('分镜已保存 ✓', 100);
+      await refreshCreation(projectId);
+    } catch (e) { task('保存失败：' + String(e), 100); }
+  };
+
   const pickHumanPrompt = (v: string) => set((s) => ({ ...s, cState: { ...s.cState, humanPrompt: v } }));
   const pickStyleRef = (v: string) => set((s) => ({ ...s, cState: { ...s.cState, styleRef: v } }));
-  const goImage = () => patch({ cStage: 'image' });
-  const genImg = (i: number) => sim('生成图片 ' + (i + 1) + '…', 1100, () => set((s) => ({ ...s, cState: { ...s.cState, imgs: { ...s.cState.imgs, [i]: true } } })));
+
+  /** 参考图分类管理（前端 state，不入 DB） */
   const addRef = (i: number, files: { name: string; dataUrl: string }[]) => set((s) => {
     const cat = s.cState.refCat[i] || 'IP形象';
     const arr = s.cState.refs[i] || [];
@@ -535,9 +871,27 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
   const delRef = (i: number, ri: number) => set((s) => ({
     ...s, cState: { ...s.cState, refs: { ...s.cState.refs, [i]: (s.cState.refs[i] || []).filter((_, k) => k !== ri) } },
   }));
-  const goFrames = () => patch({ cStage: 'frames' });
-  const genFrames = (i: number) => sim('生成首尾帧视频 ' + (i + 1) + '…', 1300, () => set((s) => ({ ...s, cState: { ...s.cState, frames: { ...s.cState.frames, [i]: true } } })));
-  const goVoice = () => patch({ cStage: 'voice' });
+
+  /** 异步：单镜图片生成 */
+  const genImg = (projectId: string, i: number) => {
+    const styleRef = get().cState.styleRef || '现实';
+    task('生成图片 ' + (i + 1) + '…', 10);
+    submitImageGen(projectId, i, styleRef, (m) => {
+      task(m.message || '生成中…', m.progress);
+      if (m.status === 'done') {
+        set((s) => ({ ...s, cState: { ...s.cState, imgs: { ...s.cState.imgs, [i]: true } } }));
+        refreshCreation(projectId);
+        task('图片生成完成 ✓', 100);
+        setTimeout(() => task('空闲', 0), 1500);
+      } else if (m.status === 'failed') {
+        task('图片生成失败：' + (m.message || ''), 100);
+      }
+    }).catch((e) => task('图片生成失败：' + String(e), 100));
+  };
+
+  /** M5 暂保留占位（M4 不涉及首尾帧/配音/导出） */
+  const genFrames = (_i: number) => task('M5 待落地', 100);
+  const genVoice = () => task('M5 待落地', 100);
   const toggleVoice = (n: string) => set((s) => {
     const ex = s.cState.voices.find((x) => x.name === n);
     return { ...s, cState: { ...s.cState, voices: ex ? s.cState.voices.filter((x) => x.name !== n) : [...s.cState.voices, { name: n, ip: n }] } };
@@ -545,32 +899,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
   const setVoiceIP = (n: string, v: string) => set((s) => ({
     ...s, cState: { ...s.cState, voices: s.cState.voices.map((x) => x.name === n ? { ...x, ip: v } : x) },
   }));
-  const genVoice = () => sim('生成配音…', 1200, () => set((s) => ({ ...s, cState: { ...s.cState, voice: { ok: true }, subs: defaultSubs() } })));
-  const goExport = () => patch({ cStage: 'export' });
-  const exportCreationJianYing = () => {
-    sim('生成剪映工程文件…', 1300, () => {
-      set((st) => {
-        const shots = st.cState.story;
-        const total = shots.reduce((m, x) => m + (x.dur || 0), 0) || 30;
-        const texts = (st.cState.subs.length ? st.cState.subs : defaultSubs()).map((t, i) => ({ id: 'text_' + i, content: t.x, start: t.t, flower: false }));
-        const voices = st.cState.voices.length ? st.cState.voices : [{ name: '默认', ip: '旁白' }];
-        const draft = {
-          app_version: '5.x', fps: 30, canvas: { w: 1920, h: 1080 }, duration: +total.toFixed(3),
-          materials: {
-            videos: shots.map((x, i) => ({ id: 'shot_' + i, file_name: '镜头' + (i + 1) + '.mp4', type: 'video', duration: +(x.dur || 0) })),
-            texts, audios: voices.map((v, i) => ({ id: 'audio_' + i, voice: v.name, ip: v.ip })),
-          },
-          tracks: [
-            { type: 'video', segments: shots.map((x, i) => ({ material_id: 'shot_' + i, start: 0, end: +(x.dur || 0) })) },
-            { type: 'text', segments: texts.map((t, i) => ({ material_id: 'text_' + i, start: 0, end: +total })) },
-            ...voices.map((v, i) => ({ type: 'audio', voice: v.name, ip: v.ip, segments: [{ material_id: 'audio_' + i, start: 0, end: +total }] })),
-          ],
-        };
-        downloadJson('draft_content.json', draft);
-        return st;
-      });
-    });
-  };
+  const exportCreationJianYing = () => task('M5 待落地', 100);
 
   // ---------- 设置 ----------
   const testProvider = (k: string) => set((s) => ({
@@ -614,10 +943,18 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
     importFilm, openEditor, updateProject, deleteProject, goEditorSub, genFilmScript, alignFilm,
     genVoiceForFilm, reVoiceForFilm, editVoiceLine, setVoiceMix, previewMix, autoCut,
     saveTimeline, archiveToFilm, goLibrary, pickFlower, setExportOpt, exportFilm,
-    uploadSpoken, transcribe, setIssue, acceptAllIssues, ignoreAllIssues, cleanFromAccepted,
+    // M2.5：影片解说生成（async 真链路）
+    submitFilmScriptGen: genFilmScript,
+    // M3：口播
+    loadSpoken, refreshSpoken, uploadSpoken, transcribe,
+    setIssue, acceptAllIssues, ignoreAllIssues, cleanFromAccepted,
     uploadAsset, delAsset, doMatch, toggleMatch, applyAllMatch,
+    extractKeywords, matchAssets,
     pickSpokenFlower, burnFlower, exportSpoken, exportSpokenJianYing,
-    genScript, goHuman, doHuman, goStory, genStory, editStory, pickHumanPrompt, pickStyleRef,
+    // 创作
+    loadCreation, refreshCreation, createCreation, deleteCreation,
+    genScript, goHuman, doHuman, goStory, genStory, editStory, persistStory,
+    pickHumanPrompt, pickStyleRef,
     goImage, genImg, addRef, setRefCat, setRefCatItem, delRef, goFrames, genFrames,
     goVoice, toggleVoice, setVoiceIP, genVoice, goExport, exportCreationJianYing,
     testProvider, savePrompt, saveSettings, resetSettings, updOther,
@@ -639,6 +976,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // 启动即拉取类型树与工程库（真实或 mock 回退）
   useEffect(() => {
     actions.initFilm();
+    actions.loadSpoken();
+    actions.loadCreation();
+    // Dev only: 挂载到 window 方便 devtools 调试与回归
+    if ((import.meta as any).env?.DEV) {
+      (window as any).__VIDEOSFLOW__ = { state, actions, task };
+      console.log('[videosflow-debug] window.__VIDEOSFLOW__ mounted for devtools');
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

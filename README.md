@@ -291,6 +291,7 @@ VideosFlow/
 
 ## 十一、快速开始
 
+### 11.1 三行启动
 ```bash
 # 1) 安装前端依赖并启动开发（Vite 热更新）
 npm install
@@ -305,7 +306,51 @@ npm run tauri:build    # 打包为平台安装包
 ```
 
 > 仅前端 UI 验证：`npm run dev` 后用浏览器打开 http://localhost:5173 即可，无需 Rust 环境。
-> 详细技术实现见 [`docs/technical-solution.md`](./docs/technical-solution.md)；界面原型见 [`preview/prototype.html`](./preview/prototype.html)。
+> 但**纯浏览器走的是 localStorage 假后端**（参见 §十一·补 已知限制），真实 AI 调用、SQLite、凭据库均要桌面版才能跑。
+
+### 11.2 首次启动 → 填 Key → 自动下载 FFmpeg
+
+桌面版（`npm run tauri:dev`）首次启动按顺序完成四件事：
+
+**(1) 自动初始化数据库 + 种子数据**
+应用启动时 `db.rs::init` 幂等建 16 张 SQLite 表（12 张主表 + M3 口播 3 张 + M3+ 凭据表 `provider_secrets`），向 `provider_config` 写入 5 个默认 Provider（Agnes LLM/图/视频 + XiaomiMimo ASR/TTS），向 `film_categories` 写入 5 个默认影片分类（电影/故事/电视剧/动画片/记录片）。SQLite 文件位于 `<应用数据目录>/videosflow.db`（Windows：`%APPDATA%\com.videosflow.app\`）。
+
+**(2) 配置主密钥 `VF_MASTER_KEY`（AES-256-GCM 加密 Key 用）**
+桌面版用 **AES-256-GCM** 加密存 API Key（替代 M0-M2 的 keyring 方案——keyring 在本机静默成功但不写 Windows Credential Manager，AES-GCM 更可靠）。
+
+主密钥 32 字节从环境变量 `VF_MASTER_KEY` 读；**未设置时降级到 dev 默认 key**（stderr 警告，生产必须设）：
+
+```powershell
+# PowerShell（仅首次启动前设一次；32 字符任取）：
+$env:VF_MASTER_KEY = "my-super-secret-32-byte-key!"
+[System.Environment]::SetEnvironmentVariable("VF_MASTER_KEY", $env:VF_MASTER_KEY, "User")
+```
+
+> **注意**：变更主密钥后，旧 AES-GCM 密文全部失效，需在设置页重新保存 5 个 Provider Key。
+
+**(3) 在「设置」页填 API Key 并测试连接**
+打开应用 → 左侧栏点 **设置 → 模型 API** → 在 LLM / 图片 / 视频 / ASR / TTS 五个卡片里依次填 Base URL 和 API Key → 点 **🔌 测试连接**。
+- **Key 不落 SQLite 明文**——用主密钥 AES-256-GCM 加密后存 `provider_secrets` 表（仅 `provider_config.has_key` 布尔标记回 UI）。解密需同主密钥。
+- 测试连接用 Rust reqwest 直连云端 `Base URL/models`，HTTP 401/403 会给出可读错误，无需 Python sidecar。
+- 如 Agnes / XiaomiMimo 暂未提供 API Key，可先跳过，UI 可点验；调用时会按"未保存 KEY"降级提示。
+
+**(4) 导出影片时按需下载 FFmpeg**
+FFmpeg **不随包**。导出影片（`film_export` 任务）时若 Rust 端检测不到 ffmpeg 二进制，会自动触发首启下载器：
+```bash
+# 仅 Windows 示例（需国内可达镜像 + SHA256 校验）：
+set VF_FFMPEG_URL=https://your-mirror/ffmpeg-windows.tar.gz
+npm run tauri:dev
+```
+下载到的临时包会通过系统 `tar` 解包到 `<应用数据目录>/ffmpeg/bin/ffmpeg(.exe)`。未配置 `VF_FFMPEG_URL` 时返回可读错误「请放置到 PATH 或 data_dir/ffmpeg/bin，或配置首启下载」，**不阻塞应用启动**。
+
+### 11.3 常见验证步骤
+1. `npm run build` → 期望 tsc + vite 零错误，生成 `dist/`。
+2. `npm run tauri:dev` → 启动桌面窗口，左侧栏四个模块可切换。
+3. **影片 → 导入影片** → 选 mp4 → 进剪辑台 → 「自动切点」→ 「时间线精修」→ 「导出 MP4」（会触发 FFmpeg + 可选 TTS 配音链路）。
+4. **设置 → 模型 API → 测试连接** → 任一 Provider 返回 `ok` 即可。
+5. 重启应用 → 影片分类、工程、Provider 配置、时间线均不丢。
+
+> 详细技术实现见 [`docs/technical-solution.md`](./docs/technical-solution.md)；开发计划见 [`docs/dev-plan.md`](./docs/dev-plan.md)；M2 影片设计见 [`docs/m2-film-design.md`](./docs/m2-film-design.md)；M3 口播设计见 [`docs/m3-spoken-design.md`](./docs/m3-spoken-design.md)；M4 创作上设计见 [`docs/m4-creation-design.md`](./docs/m4-creation-design.md)；界面原型见 [`preview/prototype.html`](./preview/prototype.html)。
 
 ---
 
@@ -331,6 +376,30 @@ npm run tauri:build    # 打包为平台安装包
    - 影片 ASR：新增 `transcribe_asr` 直连 XiaomiMimo `/v1/chat/completions`（音频 wav base64 入 `messages[].input_audio`），修复此前恒降级。
    - 影片 TTS：新增 `synthesize_tts` 直连 XiaomiMimo `/audio/speech`，音频字节写本地文件后由 `mux_cmd` 混音，修复此前 TTS 混音恒不生效。
    - `lib.rs` 删除 `mod python` + `spawn_sidecar`；`python` 模块不再被编译引用（目录保留作参考）。所有云调用均经 `cred` 取 Key 直连，无任何 sidecar 进程。
+
+### 十二·续、M3–M4 实现进展（2026-07-13）
+- **M3 口播模块**：13 个 Tauri 命令 + 5 个任务类型全链路真实化。
+  - 上传（tauri-plugin-dialog 真实文件选择）→ 抽音轨 → XiaomiMimo ASR（降级整段文本）→ 文案提取（标点切 + 去填充词）。
+  - 检测任务：FFmpeg silencedetect (gap) + Rust 编辑距离 (repeat) + Agnes LLM (mistake 失败降级静默) → 写 spoken_edits；前 2 个 issue 类目可零 LLM 成本跑通。
+  - 采纳/忽略（单条 + 全部）+ 一键应用生成 `cleanScript`（不破坏 transcript）。
+  - 关键词：Agnes LLM（prompt=keywords）→ 失败降级 Rust 端 TF-IDF 字符 2-3-gram 兜底。
+  - 素材：4 类（image/bgm/sfx/clip）真实落盘到 `data_dir/spoken_assets/{videoId}/`；类型嗅探按扩展名。
+  - 花字烧录：复用 M2 `build_ass` + `burn_ass_cmd`。
+  - 干净片段导出：基于原片裁剪（accepted edits 切 + concat + 可选烧录 + 软编码）。
+  - 剪映工程导出：前端构造 `draft_content.json`（视频轨 + 字幕/花字轨）+ 下载。
+  - 设计/决策见 [`docs/m3-spoken-design.md`](./docs/m3-spoken-design.md)。
+- **M4 创作上**：11 个 Tauri 命令 + 4 个任务类型全链路真实化。
+  - 需求 → 自动写文案（Agnes `script` 提示词）→ 去 AI 味（Agnes `humanize`）→ 生成分镜（Agnes `storyboard` 严格 JSON）→ 单镜图片（Agnes `/images/generations`，base64 写本地）。
+  - 风格约束卡 6 套（现实/科幻/卡通/写实/动漫/水彩）沿用 M3 `stylePresets`。
+  - 一致性抽检：图片大小粗筛（5KB-5MB）+ UI 横向对比；图片失败任务 failed + UI 允许重试。
+  - 设计/决策见 [`docs/m4-creation-design.md`](./docs/m4-creation-design.md)。
+- **凭据库方案切换 AES-256-GCM（关键修复）**
+  - 现象：M0-M2 用 `keyring` 写 Windows Credential Manager，桌面版保存后一直显示「尚未保存」，而 `cmdkey /list` 和 Win32 CredEnumerateW 查不到 keyring 写入的条目——keyring 3.6 在本机静默成功但不实际写凭据。
+  - 修复：移除 `keyring` 依赖，**AES-256-GCM 加密存 SQLite `provider_secrets(kind, ciphertext, updated_at)` 表**。主密钥 32 字节从环境变量 `VF_MASTER_KEY` 读；未设置时降级到 dev 默认 key（stderr 警告）。详情见 §11.2 (2)。
+  - 链路验证 · 真实 Agnes /v1/chat：**已通过**（保存后立即可读到 51 字符 Key 并完成调用）。
+- **清理 dead-code 警告**：6 个 M2 警告清零（删除 `parse_asr_data`、`_port` 加下划线前缀、`version` 加 `#[allow]`、`sniff_asset_kind` 备用保留）。
+- **Rust 端**：30 个 Tauri 命令、12 个任务类型，`cargo build` 零错误零警告（移除 keyring 后 4.85s 增量）。
+- **前端**：`npm run build` 1.15s 零错误，JS 256 kB。
 
 ### 已知限制（受真实 API 能力边界，非 bug）
 - **XiaomiMimo ASR 仅返回整段文本、无逐句时间轴**：影片「导入对齐」目前退化为「拿到整段 ASR 文本」（单 segment）。精准逐句对齐需未来接入带时间戳的 ASR 或后处理切分。

@@ -10,6 +10,16 @@ import type {
   TimelineClip,
   FlowerTemplate,
   FilmExportOptions,
+  SpokenVideo,
+  SpokenEdit,
+  SpokenAsset,
+  SpokenKeyword,
+  SpokenMatch,
+  SpokenExportOptions,
+  CreationProject,
+  Shot,
+  Storyboard,
+  GeneratedAsset,
 } from './types';
 
 export type {
@@ -22,6 +32,16 @@ export type {
   TimelineClip,
   FlowerTemplate,
   FilmExportOptions,
+  SpokenVideo,
+  SpokenEdit,
+  SpokenAsset,
+  SpokenKeyword,
+  SpokenMatch,
+  SpokenExportOptions,
+  CreationProject,
+  Shot,
+  Storyboard,
+  GeneratedAsset,
 } from './types';
 
 /** 读取全部 Provider 配置（含 hasKey 标记）。 */
@@ -219,4 +239,228 @@ export async function submitFilmExport(
     script: opts.script,
     onProgress: ch,
   });
+}
+
+// ===========================================================================
+// M3：口播模块高层封装
+// ===========================================================================
+
+export async function loadSpokenVideos(): Promise<SpokenVideo[]> {
+  return invoke<SpokenVideo[]>('spoken_video_list');
+}
+
+export async function getSpokenVideo(id: string): Promise<SpokenVideo> {
+  return invoke<SpokenVideo>('spoken_video_get', { id });
+}
+
+export async function createSpokenVideo(
+  name: string,
+  path: string,
+  duration: number,
+): Promise<string> {
+  return invoke<string>('spoken_video_create', { name, path, duration });
+}
+
+export async function deleteSpokenVideo(id: string): Promise<void> {
+  await invoke('spoken_video_delete', { id });
+}
+
+export async function extractSpokenScript(videoId: string): Promise<string> {
+  return invoke<string>('spoken_extract_script', { videoId });
+}
+
+export async function loadSpokenEdits(videoId: string): Promise<SpokenEdit[]> {
+  return invoke<SpokenEdit[]>('spoken_edits_list', { videoId });
+}
+
+export async function setSpokenEditAccepted(id: string, accepted: 0 | 1 | -1): Promise<void> {
+  await invoke('spoken_edits_set_accepted', { id, accepted });
+}
+
+export async function applySpokenEdits(videoId: string): Promise<string> {
+  return invoke<string>('spoken_apply_edits', { videoId });
+}
+
+export async function loadSpokenAssets(videoId: string): Promise<SpokenAsset[]> {
+  return invoke<SpokenAsset[]>('spoken_assets_list', { videoId });
+}
+
+export async function createSpokenAsset(
+  videoId: string,
+  name: string,
+  kind: string,
+  path: string,
+): Promise<string> {
+  return invoke<string>('spoken_asset_create', { videoId, name, kind, path });
+}
+
+export async function deleteSpokenAsset(id: string): Promise<void> {
+  await invoke('spoken_asset_delete', { id });
+}
+
+export async function loadSpokenKeywords(videoId: string): Promise<SpokenKeyword[]> {
+  return invoke<SpokenKeyword[]>('spoken_keywords_list', { videoId });
+}
+
+export async function loadSpokenMatches(videoId: string): Promise<SpokenMatch[]> {
+  return invoke<SpokenMatch[]>('spoken_matches_list', { videoId });
+}
+
+export async function toggleSpokenMatch(id: string): Promise<void> {
+  await invoke('spoken_match_toggle', { id });
+}
+
+export async function submitSpokenAsr(
+  videoId: string,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  return invoke<string>('spoken_asr', { videoId, onProgress: ch });
+}
+
+export async function submitSpokenDetect(
+  videoId: string,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  return invoke<string>('spoken_detect', { videoId, onProgress: ch });
+}
+
+export async function submitSpokenKeyword(
+  videoId: string,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  return invoke<string>('spoken_keyword', { videoId, onProgress: ch });
+}
+
+export async function matchSpokenAssets(videoId: string): Promise<SpokenMatch[]> {
+  return invoke<SpokenMatch[]>('spoken_match_assets', { videoId });
+}
+
+export async function submitSpokenBurn(
+  videoId: string,
+  flower: string,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  return invoke<string>('spoken_burn', { videoId, flower, onProgress: ch });
+}
+
+export async function submitSpokenExport(
+  videoId: string,
+  opts: SpokenExportOptions,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  return invoke<string>('spoken_export', {
+    videoId,
+    burnFlower: opts.burnFlower,
+    flower: opts.flower,
+    onProgress: ch,
+  });
+}
+
+// ===========================================================================
+// M4：创作模块高层封装
+// ===========================================================================
+
+export async function loadCreationProjects(): Promise<CreationProject[]> {
+  return invoke<CreationProject[]>('creation_project_list');
+}
+
+export async function getCreationProject(id: string): Promise<CreationProject> {
+  return invoke<CreationProject>('creation_project_get', { id });
+}
+
+export async function createCreationProject(brief: string): Promise<string> {
+  return invoke<string>('creation_project_create', { brief });
+}
+
+export async function updateCreationProject(
+  id: string,
+  patch: { brief?: string; script?: string; humanizedScript?: string; status?: string },
+): Promise<void> {
+  await invoke('creation_project_update', {
+    id,
+    brief: patch.brief ?? null,
+    script: patch.script ?? null,
+    humanizedScript: patch.humanizedScript ?? null,
+    status: patch.status ?? null,
+  });
+}
+
+export async function deleteCreationProject(id: string): Promise<void> {
+  await invoke('creation_project_delete', { id });
+}
+
+export async function loadStoryboard(projectId: string): Promise<Storyboard | null> {
+  return invoke<Storyboard | null>('storyboard_get', { projectId });
+}
+
+export async function saveStoryboard(
+  projectId: string,
+  shots: Shot[],
+  styleRef: string,
+): Promise<string> {
+  return invoke<string>('storyboard_save', {
+    projectId,
+    shots: JSON.stringify(shots),
+    styleRef,
+  });
+}
+
+export async function loadGeneratedAssets(projectId: string): Promise<GeneratedAsset[]> {
+  return invoke<GeneratedAsset[]>('generated_assets_list', { projectId });
+}
+
+export async function submitScriptWrite(
+  projectId: string,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  return invoke<string>('submit_script_write', { projectId, onProgress: ch });
+}
+
+export async function submitScriptHumanize(
+  projectId: string,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  return invoke<string>('submit_script_humanize', { projectId, onProgress: ch });
+}
+
+export async function submitStoryboardGen(
+  projectId: string,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  return invoke<string>('submit_storyboard_gen', { projectId, onProgress: ch });
+}
+
+export async function submitImageGen(
+  projectId: string,
+  shotIndex: number,
+  styleRef: string,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  return invoke<string>('submit_image_gen', {
+    projectId,
+    shotIndex,
+    styleRef,
+    onProgress: ch,
+  });
+}
+
+// ===========================================================================
+// M2.5：影片解说生成
+// ===========================================================================
+
+export async function submitFilmScriptGen(
+  projectId: string,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  return invoke<string>('submit_film_script_gen', { projectId, onProgress: ch });
 }

@@ -61,8 +61,10 @@ function ApiView() {
   const handleSave = async () => {
     actions.task('保存配置中…', 40);
     try {
+      console.log('[videosflow-debug] handleSave start; providers keys:', Object.keys(providers));
       for (const k of Object.keys(providers)) {
         const p = providers[k];
+        console.log(`[videosflow-debug] provider ${k}: apiKey len=${(p.apiKey || '').length} hasKey=${p.hasKey}`);
         await saveProvider({
           kind: k, name: p.name, provider: p.provider,
           baseUrl: p.baseUrl, model: p.model, enabled: p.enabled,

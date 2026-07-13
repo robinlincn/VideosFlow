@@ -50,6 +50,7 @@ impl FfMpeg {
         Self::locate(data_dir)
     }
 
+    #[allow(dead_code)] // 公共 API 备查：探测 ffmpeg 版本
     pub fn version(&self) -> Result<String, String> {
         let out = Command::new(&self.path)
             .arg("-version")

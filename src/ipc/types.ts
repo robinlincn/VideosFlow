@@ -131,3 +131,133 @@ export interface FilmExportOptions {
   voiceMix: number;
   script: string;
 }
+
+// ---------------------------------------------------------------------------
+// M3：口播模块领域类型
+// ---------------------------------------------------------------------------
+
+/** 口播视频行（spoken_videos）。 */
+export interface SpokenVideo {
+  id: string;
+  name: string;
+  path: string;
+  duration: number;
+  /** JSON 字符串，解析后为 AsrSegment[]（XiaomiMimo 当前仅返回单段无时间轴） */
+  transcript: string;
+  /** 提取的纯文案（按标点切 + 去填充词） */
+  script: string;
+  /** 干净文案（采纳所有 accepted=1 edits 后生成） */
+  cleanScript: string;
+  createdAt: number;
+}
+
+export type SpokenIssueKind = 'gap' | 'mistake' | 'repeat';
+
+/** 单条纠正建议（spoken_edits）。 */
+export interface SpokenEdit {
+  id: string;
+  videoId: string;
+  issueType: SpokenIssueKind;
+  start: number;
+  end: number;
+  text: string;
+  suggestion: string;
+  /** 0 待定 / 1 采纳 / -1 忽略 */
+  accepted: 0 | 1 | -1;
+}
+
+/** 素材库（spoken_assets）。 */
+export interface SpokenAsset {
+  id: string;
+  videoId: string;
+  name: string;
+  type: 'image' | 'bgm' | 'sfx' | 'clip';
+  path: string;
+}
+
+/** 关键词（spoken_keywords）。 */
+export interface SpokenKeyword {
+  id: string;
+  videoId: string;
+  text: string;
+  weight: number;
+}
+
+/** 句 ↔ 关键词 ↔ 素材 匹配（spoken_matches）。 */
+export interface SpokenMatch {
+  id: string;
+  videoId: string;
+  segStart: number;
+  segEnd: number;
+  segText: string;
+  keyword: string;
+  assetId: string;
+  applied: boolean;
+}
+
+/** 干净片段导出选项。 */
+export interface SpokenExportOptions {
+  burnFlower: boolean;
+  flower: string;
+}
+
+// ---------------------------------------------------------------------------
+// M2.5：影片解说生成
+// ---------------------------------------------------------------------------
+
+/** M2.5 影片解说生成 payload。 */
+export interface FilmScriptGenOptions {
+  videoPath: string;
+  title: string;
+  style: string;        // movie / series / variety / anime / doc / horror / funny / emotion / knowledge
+  language: string;     // 默认 'zh'
+  duration: number;     // 秒
+  hint: string;         // 辅助提示
+}
+
+// ---------------------------------------------------------------------------
+// M4：创作模块领域类型
+// ---------------------------------------------------------------------------
+
+export type CreationStatus = 'draft' | 'writing' | 'humanized' | 'storyboard' | 'images' | 'done';
+
+/** 创作工程（creation_projects）。 */
+export interface CreationProject {
+  id: string;
+  brief: string;
+  script: string;
+  humanizedScript: string;
+  status: CreationStatus;
+  createdAt: number;
+}
+
+/** 单个分镜镜头（M2.5 增 start/end/style 字段；M2 已 index/desc/dialogue/dur/cam）。 */
+export interface Shot {
+  index: number;
+  desc: string;
+  dialogue: string;
+  dur: number;
+  cam: string;
+  start?: number;
+  end?: number;
+  style?: string;
+}
+
+/** 分镜（storyboards）。 */
+export interface Storyboard {
+  id: string;
+  projectId: string;
+  shots: Shot[];
+  styleRef: string;
+  updatedAt: number;
+}
+
+/** 生成的素材（generated_assets）。 */
+export interface GeneratedAsset {
+  id: string;
+  projectId: string;
+  shotId: number;
+  kind: 'image';
+  path: string;
+  createdAt: number;
+}

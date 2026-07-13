@@ -34,6 +34,14 @@ const LS_KEYS = 'videosflow.keys.mock';
 const LS_FILM_CATS = 'videosflow.film.cats';
 const LS_FILM_PROJECTS = 'videosflow.film.projects';
 const LS_FILM_TIMELINES = 'videosflow.film.timelines';
+const LS_SPOKEN_VIDEOS = 'videosflow.spoken.videos';
+const LS_SPOKEN_EDITS = 'videosflow.spoken.edits';
+const LS_SPOKEN_ASSETS = 'videosflow.spoken.assets';
+const LS_SPOKEN_KEYWORDS = 'videosflow.spoken.keywords';
+const LS_SPOKEN_MATCHES = 'videosflow.spoken.matches';
+const LS_CREATION_PROJECTS = 'videosflow.creation.projects';
+const LS_STORYBOARDS = 'videosflow.creation.storyboards';
+const LS_GENERATED_ASSETS = 'videosflow.creation.assets';
 
 interface MockProvider {
   id: string;
@@ -468,6 +476,438 @@ async function mockInvoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
       }
       return taskId as any;
     }
+
+    // ========== M3：口播模块 mock ==========
+    case 'spoken_video_list': {
+      const all = readJSON<any[]>(LS_SPOKEN_VIDEOS, []);
+      return all as any;
+    }
+    case 'spoken_video_get': {
+      const all = readJSON<any[]>(LS_SPOKEN_VIDEOS, []);
+      return (all.find((v) => v.id === a.id) || null) as any;
+    }
+    case 'spoken_video_create': {
+      const all = readJSON<any[]>(LS_SPOKEN_VIDEOS, []);
+      const id = 'sv-' + Date.now().toString(36);
+      const row = {
+        id, name: a.name, path: a.path, duration: a.duration,
+        transcript: '', script: '', cleanScript: '', createdAt: Date.now(),
+      };
+      all.unshift(row);
+      writeJSON(LS_SPOKEN_VIDEOS, all);
+      return id as any;
+    }
+    case 'spoken_video_delete': {
+      const all = readJSON<any[]>(LS_SPOKEN_VIDEOS, []).filter((v) => v.id !== a.id);
+      writeJSON(LS_SPOKEN_VIDEOS, all);
+      // 级联清理
+      const edits = readJSON<Record<string, any[]>>(LS_SPOKEN_EDITS, {});
+      delete edits[a.id]; writeJSON(LS_SPOKEN_EDITS, edits);
+      const assets = readJSON<Record<string, any[]>>(LS_SPOKEN_ASSETS, {});
+      delete assets[a.id]; writeJSON(LS_SPOKEN_ASSETS, assets);
+      const kws = readJSON<Record<string, any[]>>(LS_SPOKEN_KEYWORDS, {});
+      delete kws[a.id]; writeJSON(LS_SPOKEN_KEYWORDS, kws);
+      const matches = readJSON<Record<string, any[]>>(LS_SPOKEN_MATCHES, {});
+      delete matches[a.id]; writeJSON(LS_SPOKEN_MATCHES, matches);
+      return undefined as any;
+    }
+    case 'spoken_extract_script': {
+      const all = readJSON<any[]>(LS_SPOKEN_VIDEOS, []);
+      const v = all.find((x) => x.id === a.videoId);
+      if (!v) return '' as any;
+      // 从 transcript JSON 解析并提取
+      try {
+        const segs = JSON.parse(v.transcript || '[]');
+        const fillers = ['那个', '呃', '啊', '嗯', '这个'];
+        const script = segs.map((s: any) => {
+          let t: string = s.text || '';
+          for (const f of fillers) t = t.split(f).join('');
+          return t.replace(/\s+/g, '').trim();
+        }).filter(Boolean).join('。');
+        v.script = script + (script && !script.endsWith('。') ? '。' : '');
+        writeJSON(LS_SPOKEN_VIDEOS, all);
+        return v.script as any;
+      } catch { return '' as any; }
+    }
+    case 'spoken_edits_list': {
+      const edits = readJSON<Record<string, any[]>>(LS_SPOKEN_EDITS, {});
+      return (edits[a.videoId] || []) as any;
+    }
+    case 'spoken_edits_set_accepted': {
+      const edits = readJSON<Record<string, any[]>>(LS_SPOKEN_EDITS, {});
+      const arr = edits[a.videoId] || [];
+      const it = arr.find((x) => x.id === a.id);
+      if (it) { it.accepted = a.accepted; }
+      edits[a.videoId] = arr;
+      writeJSON(LS_SPOKEN_EDITS, edits);
+      return undefined as any;
+    }
+    case 'spoken_apply_edits': {
+      const all = readJSON<any[]>(LS_SPOKEN_VIDEOS, []);
+      const v = all.find((x) => x.id === a.videoId);
+      if (!v) return '' as any;
+      const edits = readJSON<Record<string, any[]>>(LS_SPOKEN_EDITS, {});
+      const accepted = (edits[a.videoId] || []).filter((x: any) => x.accepted === 1);
+      // mock：把所有 accepted edits 的 text 从 script 中删除
+      let clean = v.script || '';
+      for (const e of accepted) {
+        if (e.text) clean = clean.split(e.text).join('');
+      }
+      v.cleanScript = clean;
+      writeJSON(LS_SPOKEN_VIDEOS, all);
+      return clean as any;
+    }
+    case 'spoken_assets_list': {
+      const assets = readJSON<Record<string, any[]>>(LS_SPOKEN_ASSETS, {});
+      return (assets[a.videoId] || []) as any;
+    }
+    case 'spoken_asset_create': {
+      const assets = readJSON<Record<string, any[]>>(LS_SPOKEN_ASSETS, {});
+      const id = 'sa-' + Date.now().toString(36);
+      const arr = assets[a.videoId] || [];
+      arr.push({ id, videoId: a.videoId, name: a.name, type: a.kind, path: a.path });
+      assets[a.videoId] = arr;
+      writeJSON(LS_SPOKEN_ASSETS, assets);
+      return id as any;
+    }
+    case 'spoken_asset_delete': {
+      const assets = readJSON<Record<string, any[]>>(LS_SPOKEN_ASSETS, {});
+      for (const k of Object.keys(assets)) {
+        assets[k] = (assets[k] || []).filter((x: any) => x.id !== a.id);
+      }
+      writeJSON(LS_SPOKEN_ASSETS, assets);
+      return undefined as any;
+    }
+    case 'spoken_keywords_list': {
+      const kws = readJSON<Record<string, any[]>>(LS_SPOKEN_KEYWORDS, {});
+      return (kws[a.videoId] || []) as any;
+    }
+    case 'spoken_matches_list': {
+      const m = readJSON<Record<string, any[]>>(LS_SPOKEN_MATCHES, {});
+      return (m[a.videoId] || []) as any;
+    }
+    case 'spoken_match_toggle': {
+      const m = readJSON<Record<string, any[]>>(LS_SPOKEN_MATCHES, {});
+      for (const k of Object.keys(m)) {
+        for (const x of (m[k] || [])) {
+          if (x.id === a.id) x.applied = x.applied ? 0 : 1;
+        }
+      }
+      writeJSON(LS_SPOKEN_MATCHES, m);
+      return undefined as any;
+    }
+    case 'spoken_match_assets': {
+      const kws = readJSON<Record<string, any[]>>(LS_SPOKEN_KEYWORDS, {});
+      const assets = readJSON<Record<string, any[]>>(LS_SPOKEN_ASSETS, {});
+      const arr = (assets[a.videoId] || []).slice();
+      const priority: Record<string, number> = { image: 0, clip: 1, bgm: 2, sfx: 3 };
+      arr.sort((x: any, y: any) => (priority[x.type] ?? 9) - (priority[y.type] ?? 9));
+      const used: Record<string, boolean> = {};
+      const out: any[] = [];
+      for (const kw of (kws[a.videoId] || [])) {
+        const a1 = arr.find((x: any) => !used[x.id]);
+        if (a1) {
+          used[a1.id] = true;
+          out.push({ id: 'sm-' + Math.random().toString(36).slice(2), videoId: a.videoId, segStart: 0, segEnd: 0, segText: kw.text, keyword: kw.text, assetId: a1.id, applied: 1 });
+        }
+      }
+      const m = readJSON<Record<string, any[]>>(LS_SPOKEN_MATCHES, {});
+      m[a.videoId] = out;
+      writeJSON(LS_SPOKEN_MATCHES, m);
+      return out as any;
+    }
+
+    // ---- M3 任务类型（task_submit 分支由 on_progress 通道消费） ----
+    case 'spoken_asr': {
+      const taskId = 'mock-' + Math.random().toString(36).slice(2);
+      const ch = a.on_progress;
+      const videoId = a.videoId;
+      const steps = [20, 60, 100];
+      steps.forEach((p, i) => setTimeout(() => {
+        if (i === steps.length - 1) {
+          const all = readJSON<any[]>(LS_SPOKEN_VIDEOS, []);
+          const v = all.find((x) => x.id === videoId);
+          if (v) {
+            v.transcript = JSON.stringify([{ start: 0, end: 0, text: '大家好，今天给大家介绍我们的新产品 VideosFlow。\n那个，它是一款，呃，基于 AI 的智能视频剪辑工具。\n可以自动根据文案剪辑视频。\n还能修掉口播里的气口和口误，提升观感。' }]);
+            v.script = '大家好，今天给大家介绍我们的新产品 VideosFlow。它是一款基于 AI 的智能视频剪辑工具。可以自动根据文案剪辑视频。还能修掉口播里的气口和口误，提升观感。';
+            writeJSON(LS_SPOKEN_VIDEOS, all);
+          }
+          ch && ch._on && ch._on({ taskId, progress: 100, status: 'done', message: '识别完成（mock）', payload: { degraded: true } });
+        } else {
+          ch && ch._on && ch._on({ taskId, progress: p, status: 'running', message: i === 0 ? '抽取音轨' : '语音识别' });
+        }
+      }, 300 + i * 500));
+      return taskId as any;
+    }
+    case 'spoken_detect': {
+      const taskId = 'mock-' + Math.random().toString(36).slice(2);
+      const ch = a.on_progress;
+      const videoId = a.videoId;
+      const steps = [20, 55, 85, 100];
+      steps.forEach((p, i) => setTimeout(() => {
+        if (i === steps.length - 1) {
+          const edits = readJSON<Record<string, any[]>>(LS_SPOKEN_EDITS, {});
+          edits[videoId] = [
+            { id: 'e1', videoId, issueType: 'gap', start: 0.5, end: 1.2, text: '静音 0.5s–1.2s', suggestion: '建议裁剪', accepted: 0 },
+            { id: 'e2', videoId, issueType: 'mistake', start: 0, end: 0, text: '那个，呃，', suggestion: '删除填充词', accepted: 0 },
+            { id: 'e3', videoId, issueType: 'repeat', start: 0, end: 0, text: '气口和口误', suggestion: '与上文重复，建议合并', accepted: 0 },
+          ];
+          writeJSON(LS_SPOKEN_EDITS, edits);
+          ch && ch._on && ch._on({ taskId, progress: 100, status: 'done', message: '检测到 3 个问题（mock）', payload: { count: 3 } });
+        } else {
+          ch && ch._on && ch._on({ taskId, progress: p, status: 'running', message: ['检测气口', '检测重复', 'Agnes LLM 检测口误'][i] });
+        }
+      }, 300 + i * 400));
+      return taskId as any;
+    }
+    case 'spoken_keyword': {
+      const taskId = 'mock-' + Math.random().toString(36).slice(2);
+      const ch = a.on_progress;
+      const videoId = a.videoId;
+      const steps = [30, 70, 100];
+      steps.forEach((p, i) => setTimeout(() => {
+        if (i === steps.length - 1) {
+          const kws = readJSON<Record<string, any[]>>(LS_SPOKEN_KEYWORDS, {});
+          kws[videoId] = [
+            { id: 'kw1', videoId, text: '智能', weight: 0.92 },
+            { id: 'kw2', videoId, text: '视频', weight: 0.88 },
+            { id: 'kw3', videoId, text: '剪辑', weight: 0.85 },
+            { id: 'kw4', videoId, text: '气口', weight: 0.72 },
+            { id: 'kw5', videoId, text: '口误', weight: 0.68 },
+          ];
+          writeJSON(LS_SPOKEN_KEYWORDS, kws);
+          ch && ch._on && ch._on({ taskId, progress: 100, status: 'done', message: '抽取 5 个关键词（mock）', payload: { count: 5 } });
+        } else {
+          ch && ch._on && ch._on({ taskId, progress: p, status: 'running', message: i === 0 ? 'Agnes 抽取关键词' : 'TF-IDF 兜底' });
+        }
+      }, 300 + i * 400));
+      return taskId as any;
+    }
+    case 'spoken_burn': {
+      const taskId = 'mock-' + Math.random().toString(36).slice(2);
+      const ch = a.on_progress;
+      const steps = [30, 60, 100];
+      steps.forEach((p, i) => setTimeout(() => {
+        if (i === steps.length - 1) {
+          ch && ch._on && ch._on({ taskId, progress: 100, status: 'done', message: '花字烧录完成（mock）', payload: { outPath: 'mock_burn.mp4' } });
+        } else {
+          ch && ch._on && ch._on({ taskId, progress: p, status: 'running', message: i === 0 ? '生成 ASS' : '烧录花字' });
+        }
+      }, 300 + i * 500));
+      return taskId as any;
+    }
+    case 'spoken_export': {
+      const taskId = 'mock-' + Math.random().toString(36).slice(2);
+      const ch = a.on_progress;
+      const steps = [20, 50, 80, 100];
+      steps.forEach((p, i) => setTimeout(() => {
+        if (i === steps.length - 1) {
+          ch && ch._on && ch._on({ taskId, progress: 100, status: 'done', message: '干净片段导出完成（mock）', payload: { outPath: 'mock_clean.mp4' } });
+        } else {
+          ch && ch._on && ch._on({ taskId, progress: p, status: 'running', message: ['切片段', '拼接', '导出 MP4'][i] });
+        }
+      }, 300 + i * 450));
+      return taskId as any;
+    }
+
+    // ========== M4：创作模块 mock ==========
+    case 'creation_project_list': {
+      return readJSON<any[]>(LS_CREATION_PROJECTS, []) as any;
+    }
+    case 'creation_project_get': {
+      const all = readJSON<any[]>(LS_CREATION_PROJECTS, []);
+      return (all.find((p) => p.id === a.id) || null) as any;
+    }
+    case 'creation_project_create': {
+      const all = readJSON<any[]>(LS_CREATION_PROJECTS, []);
+      const id = 'cp-' + Date.now().toString(36);
+      const row = { id, brief: a.brief, script: '', humanizedScript: '', status: 'draft', createdAt: Date.now() };
+      all.unshift(row);
+      writeJSON(LS_CREATION_PROJECTS, all);
+      return id as any;
+    }
+    case 'creation_project_update': {
+      const all = readJSON<any[]>(LS_CREATION_PROJECTS, []);
+      const it = all.find((p) => p.id === a.id);
+      if (it) {
+        if (a.brief != null) it.brief = a.brief;
+        if (a.script != null) it.script = a.script;
+        if (a.humanizedScript != null) it.humanizedScript = a.humanizedScript;
+        if (a.status != null) it.status = a.status;
+      }
+      writeJSON(LS_CREATION_PROJECTS, all);
+      return undefined as any;
+    }
+    case 'creation_project_delete': {
+      const all = readJSON<any[]>(LS_CREATION_PROJECTS, []).filter((p) => p.id !== a.id);
+      writeJSON(LS_CREATION_PROJECTS, all);
+      const sbs = readJSON<Record<string, any>>(LS_STORYBOARDS, {});
+      for (const k of Object.keys(sbs)) if (k === a.id) delete sbs[k];
+      writeJSON(LS_STORYBOARDS, sbs);
+      const assets = readJSON<Record<string, any[]>>(LS_GENERATED_ASSETS, {});
+      delete assets[a.id];
+      writeJSON(LS_GENERATED_ASSETS, assets);
+      return undefined as any;
+    }
+    case 'storyboard_get': {
+      const sbs = readJSON<Record<string, any>>(LS_STORYBOARDS, {});
+      return (sbs[a.projectId] || null) as any;
+    }
+    case 'storyboard_save': {
+      const sbs = readJSON<Record<string, any>>(LS_STORYBOARDS, {});
+      sbs[a.projectId] = {
+        id: sbs[a.projectId]?.id || ('sb-' + Date.now().toString(36)),
+        projectId: a.projectId,
+        shots: JSON.parse(a.shots || '[]'),
+        styleRef: a.styleRef,
+        updatedAt: Date.now(),
+      };
+      writeJSON(LS_STORYBOARDS, sbs);
+      return sbs[a.projectId].id as any;
+    }
+    case 'generated_assets_list': {
+      const all = readJSON<Record<string, any[]>>(LS_GENERATED_ASSETS, {});
+      return (all[a.projectId] || []) as any;
+    }
+
+    // ---- M4 任务类型 ----
+    case 'submit_script_write':
+    case 'script_write': {
+      const taskId = 'mock-' + Math.random().toString(36).slice(2);
+      const ch = a.on_progress;
+      const projectId = a.projectId;
+      const steps = [30, 70, 100];
+      steps.forEach((p, i) => setTimeout(() => {
+        if (i === steps.length - 1) {
+          const all = readJSON<any[]>(LS_CREATION_PROJECTS, []);
+          const p1 = all.find((x) => x.id === projectId);
+          if (p1) {
+            p1.script = '大家好，今天聊一个新手也能上手的事——根据需求自动生成文案。\n\n你只需要给个大体的需求，它就能自动写稿、拆分镜、出图片，还能配音加字幕。\n\n以前剪一条视频要折腾大半天，现在把想法交给它，剩下的交给流程。\n\n如果你也想轻松做视频，不妨试试看。';
+            p1.status = 'writing';
+            writeJSON(LS_CREATION_PROJECTS, all);
+          }
+          ch && ch._on && ch._on({ taskId, progress: 100, status: 'done', message: '文案生成完成（mock）', payload: { script: p1?.script || '' } });
+        } else {
+          ch && ch._on && ch._on({ taskId, progress: p, status: 'running', message: i === 0 ? '调用 Agnes' : '解析文案' });
+        }
+      }, 300 + i * 500));
+      return taskId as any;
+    }
+    case 'submit_script_humanize':
+    case 'script_humanize': {
+      const taskId = 'mock-' + Math.random().toString(36).slice(2);
+      const ch = a.on_progress;
+      const projectId = a.projectId;
+      const steps = [30, 70, 100];
+      steps.forEach((p, i) => setTimeout(() => {
+        if (i === steps.length - 1) {
+          const all = readJSON<any[]>(LS_CREATION_PROJECTS, []);
+          const p1 = all.find((x) => x.id === projectId);
+          if (p1) {
+            p1.humanizedScript = '嗨，今天说个特适合新手的事儿——给个想法就能出片。\n\n你大概说个想法就行，它自己写稿、拆镜头、出图，连配音字幕都帮你弄好。\n\n以前剪一条视频得忙活大半天，现在你把点子丢给它，流程自动跑完。\n\n想轻松做视频的话，真的可以试一下。';
+            p1.status = 'humanized';
+            writeJSON(LS_CREATION_PROJECTS, all);
+          }
+          ch && ch._on && ch._on({ taskId, progress: 100, status: 'done', message: '去 AI 味完成（mock）', payload: { human: p1?.humanizedScript || '' } });
+        } else {
+          ch && ch._on && ch._on({ taskId, progress: p, status: 'running', message: i === 0 ? '调用 Agnes 去 AI 味' : '改写文案' });
+        }
+      }, 300 + i * 500));
+      return taskId as any;
+    }
+    case 'submit_storyboard_gen':
+    case 'storyboard_gen': {
+      const taskId = 'mock-' + Math.random().toString(36).slice(2);
+      const ch = a.on_progress;
+      const projectId = a.projectId;
+      const steps = [30, 70, 100];
+      steps.forEach((p, i) => setTimeout(() => {
+        if (i === steps.length - 1) {
+          const shots = [
+            { index: 0, desc: '开场：主持人近景微笑，背景虚化', dialogue: '嗨，今天说个特适合新手的事儿。', dur: 5, cam: '近景' },
+            { index: 1, desc: '界面展示：AI 剪辑按钮高亮', dialogue: '你大概说个想法就行。', dur: 6, cam: '推近' },
+            { index: 2, desc: '动画：文案自动变成时间线', dialogue: '连配音字幕都帮你弄好。', dur: 6, cam: '平摇' },
+            { index: 3, desc: '结尾：主持人比赞，品牌浮现', dialogue: '想轻松做视频，真的可以试一下。', dur: 4, cam: '中景' },
+          ];
+          const sbs = readJSON<Record<string, any>>(LS_STORYBOARDS, {});
+          sbs[projectId] = {
+            id: 'sb-' + Date.now().toString(36),
+            projectId,
+            shots,
+            styleRef: '现实',
+            updatedAt: Date.now(),
+          };
+          writeJSON(LS_STORYBOARDS, sbs);
+          const all = readJSON<any[]>(LS_CREATION_PROJECTS, []);
+          const p1 = all.find((x) => x.id === projectId);
+          if (p1) { p1.status = 'storyboard'; writeJSON(LS_CREATION_PROJECTS, all); }
+          ch && ch._on && ch._on({ taskId, progress: 100, status: 'done', message: '分镜生成完成（mock）', payload: { shots: JSON.stringify(shots) } });
+        } else {
+          ch && ch._on && ch._on({ taskId, progress: p, status: 'running', message: i === 0 ? 'Agnes 生成中' : '解析 JSON' });
+        }
+      }, 300 + i * 600));
+      return taskId as any;
+    }
+    case 'submit_image_gen':
+    case 'image_gen': {
+      const taskId = 'mock-' + Math.random().toString(36).slice(2);
+      const ch = a.on_progress;
+      const projectId = a.projectId;
+      const shotIndex = a.shotIndex ?? 0;
+      const steps = [30, 60, 90, 100];
+      steps.forEach((p, i) => setTimeout(() => {
+        if (i === steps.length - 1) {
+          const assets = readJSON<Record<string, any[]>>(LS_GENERATED_ASSETS, {});
+          if (!assets[projectId]) assets[projectId] = [];
+          assets[projectId].push({
+            id: 'ga-' + Math.random().toString(36).slice(2),
+            projectId,
+            shotId: shotIndex,
+            kind: 'image',
+            path: `mock://shot_${shotIndex}_${Date.now()}.png`,
+            createdAt: Date.now(),
+          });
+          writeJSON(LS_GENERATED_ASSETS, assets);
+          ch && ch._on && ch._on({ taskId, progress: 100, status: 'done', message: '图片生成完成（mock）', payload: { path: `mock://shot_${shotIndex}.png` } });
+        } else {
+          ch && ch._on && ch._on({ taskId, progress: p, status: 'running', message: i === 0 ? '调用 Agnes /images/generations' : i === 1 ? '解码 base64' : '写入本地' });
+        }
+      }, 300 + i * 500));
+      return taskId as any;
+    }
+
+    // ========== M2.5：影片解说生成 mock ==========
+    case 'submit_film_script_gen':
+    case 'film_script_gen': {
+      const taskId = 'mock-' + Math.random().toString(36).slice(2);
+      const ch = a.on_progress;
+      const projectId = a.projectId;
+      const steps = [15, 30, 55, 85, 100];
+      steps.forEach((p, i) => setTimeout(() => {
+        if (i === steps.length - 1) {
+          // 模拟 6 段式 LLM 输出 → 落 film_projects.script
+          const mockScript = [
+            '[开端] 00:00-00:30 当城市被第一缕阳光唤醒，主人公缓缓走入我们的视野，一个平凡的清晨却暗藏波澜。',
+            '[铺垫] 00:30-01:30 镜头切换到办公室，电话铃声打破宁静，一通改变命运的电话即将响起。',
+            '[冲突] 01:30-02:45 突然闯入的不速之客打破了生活的平衡，气氛瞬间紧张到极点。',
+            '[高潮] 02:45-04:00 追逐、躲藏、反击，每一个画面都扣人心弦，看得人屏住呼吸。',
+            '[反转] 04:00-05:00 真相浮出水面，原来所有线索都指向一个意想不到的答案。',
+            '[结局] 05:00-05:45 故事在一声叹息中落幕，生活的真相远比想象中复杂。',
+          ].join('\n');
+          const films = readJSON<any[]>(LS_FILM_PROJECTS, []);
+          const film = films.find(f => f.id === projectId);
+          if (film) {
+            film.script = mockScript;
+            writeJSON(LS_FILM_PROJECTS, films);
+          }
+          ch && ch._on && ch._on({ taskId, progress: 100, status: 'done', message: '解说文案生成完成（mock）', payload: { script: mockScript } });
+        } else {
+          ch && ch._on && ch._on({ taskId, progress: p, status: 'running', message: ['抽取音轨', 'XiaomiMimo ASR 转写', 'Agnes 六段式生成', '写入影片库'][i] });
+        }
+      }, 300 + i * 500));
+      return taskId as any;
+    }
+
     default:
       throw new Error(`未知命令: ${cmd}`);
   }
