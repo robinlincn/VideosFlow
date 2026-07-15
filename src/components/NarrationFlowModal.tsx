@@ -106,7 +106,14 @@ export default function NarrationFlowModal({ open: isOpen, onClose, onComplete }
     setTaskPct(15);
     setTaskMsg('抽取音轨');
     try {
-      await submitFilmScriptGen(editingProj.id, (m: ProgressMsg) => {
+      await submitFilmScriptGen(editingProj.id, {
+        videoPath: (editingProj as any).videoPath || '',
+        title: (editingProj as any).title || (editingProj as any).t || '未命名视频',
+        style: (editingProj as any).categoryId || 'movie',
+        language: 'zh',
+        duration: 180,
+        hint: '',
+      }, (m: ProgressMsg) => {
         setTaskPct(m.progress);
         setTaskMsg(m.message || '');
         if (m.status === 'done') {

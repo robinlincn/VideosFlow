@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../state/AppContext';
-import { settingsSteps } from '../data/mock';
+import { settingsSteps, type ProviderCfg } from '../data/mock';
 import {
   loadProviders, saveProvider, setProviderKey, testProvider as ipcTestProvider,
-  submitChatTask,
+  getModelsDir, submitChatTask, downloadModel, checkLocalModel, LOCAL_ASR_MODELS,
 } from '../ipc/providers';
 
 const PROVIDER_OPTS: Record<string, string[]> = {
@@ -13,6 +13,11 @@ const PROVIDER_OPTS: Record<string, string[]> = {
   tts: ['Mimo', 'Edge-TTS', 'CosyVoice', '云 TTS'],
   video: ['Agnes', 'Runway', '通义万相', 'SVD', 'Pika'],
 };
+
+// 语音识别里可选的两个「本地推理」引擎：选中后无需填写 Base URL / 模型 / API Key
+const LOCAL_ASR = ['本地 faster-whisper', 'Whisper'];
+const isLocalProvider = (p: ProviderCfg): boolean =>
+  p.mode === 'local' || LOCAL_ASR.includes(p.provider);
 
 export default function Settings() {
   const { state, actions } = useApp();
@@ -57,6 +62,53 @@ function ApiView() {
   const [chatLog, setChatLog] = useState<string[]>([]);
   const [chatBusy, setChatBusy] = useState(false);
   const [chatAnswer, setChatAnswer] = useState<string | null>(null);
+  const [modelsDir, setModelsDir] = useState('');
+  // 本地模型下载相关状态（仅 ASR 本地模式使用）
+  const [dlModel, setDlModel] = useState('base');
+  const [dlSource, setDlSource] = useState('hf-mirror');
+  const [dlBusy, setDlBusy] = useState(false);
+  const [dlProg, setDlProg] = useState<{ current: number; total: number; file: string; phase: string }>({ current: 0, total: 0, file: '', phase: '' });
+  const [localReady, setLocalReady] = useState<boolean | null>(null);
+
+  // 加载本地模型目录（资源文件夹下的 models 子目录），供「本地推理」提示卡展示
+  useEffect(() => {
+    getModelsDir().then(setModelsDir).catch(() => setModelsDir(''));
+  }, []);
+
+  const copyModelsDir = async (text: string) => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      actions.task('模型目录路径已复制 ✓', 100);
+    } catch {
+      /* 剪贴板不可用时静默 */
+    }
+  };
+
+  // 进入本地 ASR 模式时，检查所选尺寸的本地模型是否已下载
+  useEffect(() => {
+    const asr = providers['asr'];
+    if (asr && isLocalProvider(asr)) {
+      checkLocalModel(dlModel).then(setLocalReady).catch(() => setLocalReady(false));
+    }
+  }, [providers, dlModel]);
+
+  const handleDownload = async () => {
+    setDlBusy(true);
+    setDlProg({ current: 0, total: 0, file: '', phase: 'listing' });
+    try {
+      const dir = await downloadModel(dlModel, dlSource, (p: any) => {
+        setDlProg({ current: p.current || 0, total: p.total || 0, file: p.file || '', phase: p.phase || '' });
+      });
+      setLocalReady(true);
+      actions.task(`本地模型已下载到 ${dir} ✓`, 100);
+    } catch (e) {
+      setLocalReady(false);
+      actions.task(`下载失败: ${String(e)}`, 100);
+    } finally {
+      setDlBusy(false);
+    }
+  };
 
   const handleSave = async () => {
     actions.task('保存配置中…', 40);
@@ -65,11 +117,14 @@ function ApiView() {
       for (const k of Object.keys(providers)) {
         const p = providers[k];
         console.log(`[videosflow-debug] provider ${k}: apiKey len=${(p.apiKey || '').length} hasKey=${p.hasKey}`);
+        const isLocal = isLocalProvider(p);
         await saveProvider({
           kind: k, name: p.name, provider: p.provider,
           baseUrl: p.baseUrl, model: p.model, enabled: p.enabled,
+          mode: isLocal ? 'local' : 'cloud',
         });
-        if (p.apiKey && p.apiKey.trim()) {
+        // 本地推理无需密钥；仅云端模式才写入 API Key
+        if (!isLocal && p.apiKey && p.apiKey.trim()) {
           await setProviderKey(k, p.apiKey.trim());
         }
       }
@@ -88,7 +143,7 @@ function ApiView() {
     actions.setProviderTest(k, 'testing');
     try {
       const res = await ipcTestProvider(k, providers[k].apiKey);
-      actions.setProviderTest(k, res === 'ok' ? 'ok' : 'fail');
+      actions.setProviderTest(k, res === 'ok' ? 'ok' : res === 'local' ? 'local' : 'fail');
     } catch (e) {
       actions.setProviderTest(k, 'fail');
       actions.task(`测试 ${providers[k].name} 失败: ${String(e)}`, 100);
@@ -121,6 +176,7 @@ function ApiView() {
       <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
         {Object.keys(providers).map((k) => {
           const p = providers[k];
+          const isLocal = isLocalProvider(p);
           const status =
             p.test === 'ok' ? '✓ 已连接'
             : p.test === 'local' ? '本地'
@@ -140,13 +196,70 @@ function ApiView() {
                   {(PROVIDER_OPTS[k] || [p.provider]).map((o) => <option key={o}>{o}</option>)}
                 </select>
               </div>
-              <div className="field"><label>Base URL</label><input value={p.baseUrl} placeholder="(留空使用默认)" onChange={(e) => actions.set({ settingsState: { ...state.settingsState, providers: { ...state.settingsState.providers, [k]: { ...p, baseUrl: e.target.value } } } })} /></div>
-              <div className="field"><label>模型</label><input value={p.model} onChange={(e) => actions.set({ settingsState: { ...state.settingsState, providers: { ...state.settingsState.providers, [k]: { ...p, model: e.target.value } } } })} /></div>
-              <div className="field"><label>API Key</label><input type="password" value={p.apiKey} placeholder="存入系统凭据，不进 SQLite 明文" onChange={(e) => actions.set({ settingsState: { ...state.settingsState, providers: { ...state.settingsState.providers, [k]: { ...p, apiKey: e.target.value } } } })} />
-                <div className="muted sm" style={{ marginTop: 4, color: p.hasKey ? 'var(--accent, #b85c38)' : 'var(--muted, #8a7f74)' }}>{keyHint}</div>
-              </div>
+
+              {isLocal ? (
+                <div className="pcard-local">
+                  <div className="pcard-local__badge">⚙ 本地推理 · 无需联网</div>
+                  <div className="muted sm" style={{ marginBottom: 8 }}>
+                    该引擎在本地运行，无需填写 Base URL / 模型 / API Key。请把对应的本地大模型权重下载到下方模型目录：
+                  </div>
+                  <div className="pcard-local__path">
+                    <code>{modelsDir || '（加载中…）'}</code>
+                    <button className="btn sm ghost" type="button" onClick={() => copyModelsDir(modelsDir)} disabled={!modelsDir}>复制路径</button>
+                  </div>
+
+                  <div className="local-dl">
+                    <div className="field" style={{ marginTop: 8 }}><label>模型尺寸</label>
+                      <select value={dlModel} onChange={(e) => setDlModel(e.target.value)} disabled={dlBusy}>
+                        {LOCAL_ASR_MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                      </select>
+                    </div>
+                    <div className="field"><label>下载源</label>
+                      <select value={dlSource} onChange={(e) => setDlSource(e.target.value)} disabled={dlBusy}>
+                        <option value="hf-mirror">HuggingFace 镜像 (hf-mirror.com，国内推荐)</option>
+                        <option value="huggingface">HuggingFace 官方 (需可访问外网)</option>
+                      </select>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
+                      <button className="btn sm ok" onClick={handleDownload} disabled={dlBusy}>
+                        {dlBusy ? '下载中…' : localReady ? '⬇ 重新下载' : '⬇ 下载模型'}
+                      </button>
+                      {localReady === true && <span className="tag ok">已就绪</span>}
+                      {localReady === false && !dlBusy && <span className="tag key">未下载</span>}
+                    </div>
+                    {dlBusy && dlProg.phase === 'listing' && (
+                      <div className="muted sm" style={{ marginTop: 6 }}>正在列举模型文件…</div>
+                    )}
+                    {dlBusy && dlProg.total > 0 && (
+                      <div className="dl-progress" style={{ marginTop: 6 }}>
+                        <div className="dl-bar" style={{ width: `${Math.min(100, (dlProg.current / dlProg.total) * 100)}%` }} />
+                        <div className="muted sm" style={{ marginTop: 4 }}>
+                          {dlProg.file} · {(dlProg.current / 1048576).toFixed(1)} / {(dlProg.total / 1048576).toFixed(1)} MB
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="pcard-local__hint">
+                    • 下载使用 <b>faster-whisper</b> 的 CTranslate2 权重（config.json + model.bin + tokenizer.json + vocabulary.txt）。<br/>
+                    • 下载完成后，影片 / 口播的「语音识别」将自动走本地推理，不再依赖云端（无 402 / 无网络要求）。<br/>
+                    <span className="muted">如本地已安装 Python + faster-whisper，也可手动把模型放到上述目录；或用环境变量 VF_PYTHON / VF_TRANSCRIBE_SCRIPT 指定解释器与脚本路径。</span>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="field"><label>Base URL</label><input value={p.baseUrl} placeholder="(留空使用默认)" onChange={(e) => actions.set({ settingsState: { ...state.settingsState, providers: { ...state.settingsState.providers, [k]: { ...p, baseUrl: e.target.value } } } })} /></div>
+                  <div className="field"><label>模型</label><input value={p.model} onChange={(e) => actions.set({ settingsState: { ...state.settingsState, providers: { ...state.settingsState.providers, [k]: { ...p, model: e.target.value } } } })} /></div>
+                  <div className="field"><label>API Key</label><input type="password" value={p.apiKey} placeholder="存入系统凭据，不进 SQLite 明文" onChange={(e) => actions.set({ settingsState: { ...state.settingsState, providers: { ...state.settingsState.providers, [k]: { ...p, apiKey: e.target.value } } } })} />
+                    <div className="muted sm" style={{ marginTop: 4, color: p.hasKey ? 'var(--accent, #b85c38)' : 'var(--muted, #8a7f74)' }}>{keyHint}</div>
+                  </div>
+                </>
+              )}
+
               <div style={{ display: 'flex', gap: 8, marginTop: 6, alignItems: 'center' }}>
-                <button className="btn sm ghost" onClick={() => handleTest(k)} disabled={p.test === 'testing'}>🔌 测试连接</button>
+                {!isLocal && (
+                  <button className="btn sm ghost" onClick={() => handleTest(k)} disabled={p.test === 'testing'}>🔌 测试连接</button>
+                )}
                 <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, color: 'var(--muted)' }}>
                   <input type="checkbox" checked={p.enabled} onChange={(e) => actions.set({ settingsState: { ...state.settingsState, providers: { ...state.settingsState.providers, [k]: { ...p, enabled: e.target.checked } } } })} /> 启用
                 </label>

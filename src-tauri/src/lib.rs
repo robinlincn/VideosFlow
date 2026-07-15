@@ -6,6 +6,7 @@ mod commands;
 mod cred;
 mod db;
 mod ffmpeg;
+mod fileserver;
 mod tasks;
 
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
@@ -17,6 +18,8 @@ pub struct AppState {
     pub task_tx: tasks::TaskSender,
     pub sidecar_port: u16,
     pub data_dir: std::path::PathBuf,
+    pub models_dir: std::path::PathBuf,
+    pub video_server_port: u16,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -29,6 +32,16 @@ pub fn run() {
                 // 数据目录（工程库 / sidecar 缓存 / FFmpeg 缓存）
                 let data_dir = handle.path().app_data_dir().map_err(|e| e.to_string())?;
                 std::fs::create_dir_all(&data_dir).ok();
+                // 本地模型目录：默认指向「本项目根目录下的 models」（用户要求下载到项目内，便于版本管理与直接查看）；
+                // 可用环境变量 VF_MODELS_DIR 覆盖（生产打包后项目根不存在时使用）。
+                let models_dir = if let Ok(p) = std::env::var("VF_MODELS_DIR") {
+                    std::path::PathBuf::from(p)
+                } else {
+                    std::env::current_dir()
+                        .map(|d| d.join("models"))
+                        .unwrap_or_else(|_| data_dir.join("models"))
+                };
+                std::fs::create_dir_all(&models_dir).ok();
 
                 // SQLite 连接 + 首次建表/种子
                 let db_path = data_dir.join("videosflow.db");
@@ -47,7 +60,10 @@ pub fn run() {
 
                 // 任务队列 + worker
                 let (tx, rx) = tokio::sync::mpsc::channel::<tasks::TaskJob>(32);
-                tasks::start(pool.clone(), client.clone(), port, data_dir.clone(), rx);
+                tasks::start(pool.clone(), client.clone(), port, data_dir.clone(), models_dir.clone(), rx);
+
+                // 本地视频预览文件服务器（127.0.0.1，支持 Range，供 WebView <video> 播放）
+                let video_port = fileserver::start();
 
                 handle.manage(AppState {
                     pool,
@@ -55,6 +71,8 @@ pub fn run() {
                     task_tx: tx,
                     sidecar_port: port,
                     data_dir,
+                    models_dir,
+                    video_server_port: video_port,
                 });
                 Ok(())
             });
@@ -68,6 +86,9 @@ pub fn run() {
             commands::provider_key_set,
             commands::provider_key_get,
             commands::provider_test,
+            commands::get_models_dir,
+            commands::download_model,
+            commands::check_local_model,
             commands::task_submit,
             commands::task_status,
             // ---- M2 film 命令 ----
@@ -120,6 +141,7 @@ pub fn run() {
             commands::submit_storyboard_gen,
             commands::submit_image_gen,
             commands::submit_film_script_gen,
+            commands::get_video_server_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running VideosFlow");

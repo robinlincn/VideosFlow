@@ -11,6 +11,8 @@ export interface ProviderRow {
   model: string;
   enabled: boolean;
   hasKey: boolean;
+  /** 运行模式：'cloud'（云端 API）或 'local'（本地推理，如 faster-whisper/Whisper） */
+  mode?: string;
 }
 
 /** 任务进度消息（经 Tauri Channel 实时推送）。 */

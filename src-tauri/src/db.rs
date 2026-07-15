@@ -20,6 +20,8 @@ pub struct ProviderRow {
     pub enabled: bool,
     /// 凭据库是否存在 key（运行时按凭据库补充，不落库）
     pub has_key: bool,
+    /// 运行模式：'cloud'（云端 API，需 Base URL/Model/Key）或 'local'（本地推理，如 faster-whisper/Whisper）
+    pub mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,7 +232,7 @@ fn now_secs() -> i64 {
 pub async fn init(pool: &SqlitePool) -> Result<(), String> {
     let stmts = [
         "CREATE TABLE IF NOT EXISTS film_categories(id TEXT PRIMARY KEY, name TEXT, \"order\" INT, editable INT DEFAULT 1)",
-        "CREATE TABLE IF NOT EXISTS film_projects(id TEXT PRIMARY KEY, category_id TEXT, title TEXT, cover TEXT, status TEXT, tags TEXT, created_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS film_projects(id TEXT PRIMARY KEY, category_id TEXT, title TEXT, cover TEXT, status TEXT, tags TEXT, script TEXT, created_at INTEGER)",
         "CREATE TABLE IF NOT EXISTS edit_timelines(id TEXT PRIMARY KEY, project_id TEXT, tracks TEXT, clips TEXT, updated_at INTEGER)",
         "CREATE TABLE IF NOT EXISTS spoken_videos(id TEXT PRIMARY KEY, path TEXT, duration REAL, transcript TEXT, script TEXT, clean_script TEXT, created_at INTEGER)",
         "CREATE TABLE IF NOT EXISTS spoken_edits(id TEXT PRIMARY KEY, video_id TEXT, issue_type TEXT, start REAL, end REAL, text TEXT, suggestion TEXT, accepted INT DEFAULT 0)",
@@ -242,7 +244,7 @@ pub async fn init(pool: &SqlitePool) -> Result<(), String> {
         "CREATE TABLE IF NOT EXISTS generated_assets(id TEXT PRIMARY KEY, shot_id TEXT, kind TEXT, path TEXT, created_at INTEGER)",
         "CREATE TABLE IF NOT EXISTS voiceovers(id TEXT PRIMARY KEY, project_id TEXT, shot_id TEXT, voice_id TEXT, path TEXT)",
         "CREATE TABLE IF NOT EXISTS subtitles(id TEXT PRIMARY KEY, project_id TEXT, start REAL, end REAL, text TEXT, style_id TEXT)",
-        "CREATE TABLE IF NOT EXISTS provider_config(id TEXT PRIMARY KEY, kind TEXT UNIQUE, name TEXT, provider TEXT, base_url TEXT, api_key TEXT, model TEXT, extra TEXT, enabled INT DEFAULT 1, has_key INTEGER DEFAULT 0)",
+        "CREATE TABLE IF NOT EXISTS provider_config(id TEXT PRIMARY KEY, kind TEXT UNIQUE, name TEXT, provider TEXT, base_url TEXT, api_key TEXT, model TEXT, extra TEXT, enabled INT DEFAULT 1, has_key INTEGER DEFAULT 0, mode TEXT NOT NULL DEFAULT 'cloud')",
         "CREATE TABLE IF NOT EXISTS provider_secrets(kind TEXT PRIMARY KEY, ciphertext TEXT NOT NULL, updated_at INTEGER)",
         "CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, project_id TEXT, \"type\" TEXT, status TEXT, progress REAL, log TEXT, created_at INTEGER)",
     ];
@@ -252,9 +254,14 @@ pub async fn init(pool: &SqlitePool) -> Result<(), String> {
             .await
             .map_err(|e| format!("建表失败: {e}"))?;
     }
+    // 兼容旧库：film_projects 早期无 script 列，按需补列（全新库建表已含，PRAGMA 探测到会跳过）
+    let _ = sqlx::query("ALTER TABLE film_projects ADD COLUMN script TEXT")
+        .execute(pool)
+        .await;
     seed_defaults(pool).await?;
     seed_film_categories(pool).await?;
     ensure_provider_has_key_col(pool).await?;
+    ensure_provider_mode_col(pool).await?;
     Ok(())
 }
 
@@ -272,6 +279,26 @@ async fn ensure_provider_has_key_col(pool: &SqlitePool) -> Result<(), String> {
     });
     if !has {
         sqlx::query("ALTER TABLE provider_config ADD COLUMN has_key INTEGER DEFAULT 0")
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 兼容已存在的旧 DB：provider_config 早期没有 mode 列，这里按需 ALTER 补列（默认 'cloud'）。
+async fn ensure_provider_mode_col(pool: &SqlitePool) -> Result<(), String> {
+    let cols = sqlx::query("PRAGMA table_info(provider_config)")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let has = cols.iter().any(|r| {
+        r.try_get::<String, _>("name")
+            .map(|n| n == "mode")
+            .unwrap_or(false)
+    });
+    if !has {
+        sqlx::query("ALTER TABLE provider_config ADD COLUMN mode TEXT NOT NULL DEFAULT 'cloud'")
             .execute(pool)
             .await
             .map_err(|e| e.to_string())?;
@@ -359,12 +386,16 @@ fn row_to_provider(r: &sqlx::sqlite::SqliteRow) -> Result<ProviderRow, String> {
         // has_key 以 DB 布尔列为权威标记（写入密钥成功后由 provider_key_set 置位），
         // 仅在 DB 为 false 时由调用方回退凭据库探测，避免被凭据库回读不稳拖累 UI。
         has_key: r.try_get::<i64, _>("has_key").map(|v| v != 0).unwrap_or(false),
+        // mode 缺省回退 'cloud'（兼容旧库无该列时的读取）
+        mode: r.try_get::<String, _>("mode")
+            .map(|m| if m.is_empty() { "cloud".into() } else { m })
+            .unwrap_or_else(|_| "cloud".into()),
     })
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<ProviderRow>, String> {
     let rows = sqlx::query(
-        "SELECT id,kind,name,provider,base_url,model,enabled,has_key FROM provider_config ORDER BY kind",
+        "SELECT id,kind,name,provider,base_url,model,enabled,has_key,mode FROM provider_config ORDER BY kind",
     )
     .fetch_all(pool)
     .await
@@ -374,7 +405,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<ProviderRow>, String> {
 
 pub async fn get_by_kind(pool: &SqlitePool, kind: &str) -> Result<ProviderRow, String> {
     let r = sqlx::query(
-        "SELECT id,kind,name,provider,base_url,model,enabled,has_key FROM provider_config WHERE kind=?",
+        "SELECT id,kind,name,provider,base_url,model,enabled,has_key,mode FROM provider_config WHERE kind=?",
     )
     .bind(kind)
     .fetch_optional(pool)
@@ -392,11 +423,13 @@ pub async fn upsert(
     base_url: &str,
     model: &str,
     enabled: bool,
+    mode: &str,
 ) -> Result<(), String> {
     let id = uuid::Uuid::new_v4().to_string();
+    let mode = if mode.is_empty() { "cloud" } else { mode };
     sqlx::query(
-        "INSERT INTO provider_config(id,kind,name,provider,base_url,model,enabled) VALUES(?,?,?,?,?,?,?) \
-         ON CONFLICT(kind) DO UPDATE SET name=excluded.name, provider=excluded.provider, base_url=excluded.base_url, model=excluded.model, enabled=excluded.enabled",
+        "INSERT INTO provider_config(id,kind,name,provider,base_url,model,enabled,mode) VALUES(?,?,?,?,?,?,?,?) \
+         ON CONFLICT(kind) DO UPDATE SET name=excluded.name, provider=excluded.provider, base_url=excluded.base_url, model=excluded.model, enabled=excluded.enabled, mode=excluded.mode",
     )
     .bind(&id)
     .bind(kind)
@@ -405,9 +438,10 @@ pub async fn upsert(
     .bind(base_url)
     .bind(model)
         .bind(if enabled { 1i64 } else { 0i64 })
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+        .bind(mode)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -666,6 +700,17 @@ pub async fn film_project_update(
     }
     q = q.bind(id);
     q.execute(pool).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 写入影片解说文案（film_script_gen 工作流的结果落库点）。
+pub async fn film_project_set_script(pool: &SqlitePool, id: &str, script: &str) -> Result<(), String> {
+    sqlx::query("UPDATE film_projects SET script=? WHERE id=?")
+        .bind(script)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

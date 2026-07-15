@@ -7,7 +7,7 @@ use tauri::ipc::Channel;
 use tokio::sync::mpsc;
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use reqwest::Client;
 use sqlx::sqlite::SqlitePool;
@@ -41,8 +41,15 @@ pub struct TaskJob {
 
 pub type TaskSender = mpsc::Sender<TaskJob>;
 
+/// 本地模型目录（项目根 models/），由 Tauri setup 注入，供本地 ASR 推理查找权重。
+static MODELS_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+pub fn set_models_dir(d: std::path::PathBuf) {
+    let _ = MODELS_DIR.set(d);
+}
+
 /// 启动 worker（在 Tauri 异步运行时中消费队列）。
-pub fn start(pool: SqlitePool, client: Client, port: u16, data_dir: std::path::PathBuf, rx: mpsc::Receiver<TaskJob>) {
+pub fn start(pool: SqlitePool, client: Client, port: u16, data_dir: std::path::PathBuf, models_dir: std::path::PathBuf, rx: mpsc::Receiver<TaskJob>) {
+    set_models_dir(models_dir);
     tauri::async_runtime::spawn(async move {
         run_loop(pool, client, port, data_dir, rx).await;
     });
@@ -107,13 +114,19 @@ async fn run_job(pool: &SqlitePool, client: &Client, port: u16, data_dir: &Path,
         }
         "film_import" => {
             match run_film_import(pool, client, port, data_dir, &job, emit.clone()).await {
-                Ok(degraded) => {
+                Ok((degraded, asr_reason)) => {
                     db::task_update(pool, &job.id, "done", 100.0, "导入对齐完成").await.ok();
                     emit(ProgressMsg {
                         task_id: job.id.clone(),
                         progress: 100.0,
                         status: "done".into(),
-                        message: Some(if degraded { "导入完成（ASR 未就绪，已生成草稿时间线）" } else { "导入对齐完成" }.into()),
+                        message: Some(
+            if degraded {
+                format!("导入完成（ASR 未就绪：{asr_reason}，已生成草稿时间线）")
+            } else {
+                "导入对齐完成".into()
+            },
+        ),
                         payload: Some(serde_json::json!({ "degraded": degraded })),
                     });
                 }
@@ -407,14 +420,14 @@ async fn run_job(pool: &SqlitePool, client: &Client, port: u16, data_dir: &Path,
         }
         "film_script_gen" => {
             match run_film_script_gen(pool, client, port, data_dir, &job, emit.clone()).await {
-                Ok(script) => {
+                Ok((script, asr_failed, asr_reason)) => {
                     db::task_update(pool, &job.id, "done", 100.0, "影片解说文案已生成").await.ok();
                     emit(ProgressMsg {
                         task_id: job.id.clone(),
                         progress: 100.0,
                         status: "done".into(),
                         message: Some("影片解说文案已生成".into()),
-                        payload: Some(serde_json::json!({ "script": script })),
+                        payload: Some(serde_json::json!({ "script": script, "asrFailed": asr_failed, "asrReason": asr_reason })),
                     });
                 }
                 Err(e) => {
@@ -621,22 +634,48 @@ fn is_silence_or_junk(span: (f64, f64), silence: &[(f64, f64)], min_dur: f64) ->
 /// 语音识别（ASR）：直连 XiaomiMimo /chat/completions（OpenAI 兼容，音频以 base64 置于 messages.input_audio）。
 /// 返回 (segments, language, duration, degraded)。无 Key / 无音频 / 调用失败均降级（degraded=true），不阻塞导入。
 /// 注：XiaomiMimo ASR 仅返回整段文本（无逐句时间轴），故整段作为一个 segment 存储。
+/// 返回 (segments, language, duration, degraded, reason)。
+/// reason 仅在降级时非空，描述失败原因（Key 无效 / 余额不足 / 网络等），用于前端精确提示。
+/// 将 ASR 网关返回的错误体解析为对中文用户友好的原因描述（去掉原始 JSON 噪声）。
+fn asr_error_reason(status: u16, body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        let msg = v
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .or_else(|| v.get("message").and_then(|m| m.as_str()))
+            .or_else(|| v.get("error").and_then(|e| e.get("type")).and_then(|t| t.as_str()));
+        if let Some(m) = msg {
+            return match status {
+                402 => "HTTP 402：XiaomiMimo 账户余额不足，请到 XiaomiMimo 控制台充值后再试".to_string(),
+                401 | 403 => format!("HTTP {status}：API Key 无效或未授权"),
+                _ => format!("HTTP {status}：{m}"),
+            };
+        }
+    }
+    format!("HTTP {status}：{}", body.chars().take(200).collect::<String>())
+}
+
 async fn transcribe_asr(
     pool: &SqlitePool,
     client: &Client,
     audio_path: &str,
-) -> (Vec<db::AsrSegment>, String, f64, bool) {
+) -> (Vec<db::AsrSegment>, String, f64, bool, String) {
     let row = match db::get_by_kind(pool, "asr").await {
         Ok(r) => r,
-        Err(_) => return (Vec::new(), "zh".to_string(), 0.0, true),
+        Err(_) => return (Vec::new(), "zh".to_string(), 0.0, true, "未找到 ASR Provider 配置".into()),
     };
+    // 本地推理模式：直接调用本地 faster-whisper（Python CLI），不走云端网关
+    if row.mode == "local" {
+        return transcribe_local(audio_path).await;
+    }
     let key = match cred::get_key(pool, "asr").await.ok().flatten() {
         Some(k) if !k.is_empty() => k,
-        _ => return (Vec::new(), "zh".to_string(), 0.0, true),
+        _ => return (Vec::new(), "zh".to_string(), 0.0, true, "未配置 ASR API Key".into()),
     };
     let bytes = match std::fs::read(audio_path) {
         Ok(b) => b,
-        Err(_) => return (Vec::new(), "zh".to_string(), 0.0, true),
+        Err(_) => return (Vec::new(), "zh".to_string(), 0.0, true, "读取音频文件失败".into()),
     };
     let b64 = B64.encode(&bytes);
     let base_url = row.base_url.trim_end_matches('/');
@@ -661,14 +700,17 @@ async fn transcribe_asr(
         .await
     {
         Ok(r) => r,
-        Err(_) => return (Vec::new(), "zh".to_string(), 0.0, true),
+        Err(_) => return (Vec::new(), "zh".to_string(), 0.0, true, "ASR 网络请求失败".into()),
     };
     if !resp.status().is_success() {
-        return (Vec::new(), "zh".to_string(), 0.0, true);
+        let code = resp.status().as_u16();
+        let txt = resp.text().await.unwrap_or_default();
+        let reason = asr_error_reason(code, &txt);
+        return (Vec::new(), "zh".to_string(), 0.0, true, reason);
     }
     let v: serde_json::Value = match resp.json().await {
         Ok(j) => j,
-        Err(_) => return (Vec::new(), "zh".to_string(), 0.0, true),
+        Err(_) => return (Vec::new(), "zh".to_string(), 0.0, true, "ASR 响应解析失败".into()),
     };
     let text = v
         .get("choices")
@@ -679,7 +721,7 @@ async fn transcribe_asr(
         .unwrap_or("")
         .to_string();
     if text.trim().is_empty() {
-        return (Vec::new(), "zh".to_string(), 0.0, true);
+        return (Vec::new(), "zh".to_string(), 0.0, true, "ASR 返回为空".into());
     }
     let seg = db::AsrSegment {
         start: 0.0,
@@ -687,7 +729,68 @@ async fn transcribe_asr(
         text,
         confidence: 1.0,
     };
-    (vec![seg], "zh".to_string(), 0.0, false)
+    (vec![seg], "zh".to_string(), 0.0, false, String::new())
+}
+
+/// 本地 ASR 推理：扫描 models 目录找到含 model.bin + config.json 的本地 faster-whisper 权重，
+/// 调用 python-sidecar/transcribe.py（faster-whisper）做本地转写，返回 segments。
+/// 支持环境变量 VF_PYTHON（Python 解释器路径）与 VF_TRANSCRIBE_SCRIPT（脚本路径）。
+async fn transcribe_local(audio_path: &str) -> (Vec<db::AsrSegment>, String, f64, bool, String) {
+    let base = match MODELS_DIR.get() {
+        Some(d) => d.clone(),
+        None => return (Vec::new(), "zh".to_string(), 0.0, true, "未配置本地模型目录".into()),
+    };
+    // 查找已下载的本地模型目录（含 model.bin 与 config.json）
+    let mut model_path: Option<std::path::PathBuf> = None;
+    if let Ok(entries) = std::fs::read_dir(&base) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() && p.join("model.bin").exists() && p.join("config.json").exists() {
+                model_path = Some(p);
+                break;
+            }
+        }
+    }
+    let model_path = match model_path {
+        Some(p) => p,
+        None => return (Vec::new(), "zh".to_string(), 0.0, true,
+            format!("未在 {} 找到已下载的本地模型，请先在「设置 → 接口 → 语音识别」下载 faster-whisper 模型", base.display())),
+    };
+    // 调用本地推理脚本（faster-whisper / Python）
+    let py = std::env::var("VF_PYTHON").unwrap_or_else(|_| "python".to_string());
+    let script = std::env::var("VF_TRANSCRIBE_SCRIPT")
+        .unwrap_or_else(|_| "python-sidecar/transcribe.py".to_string());
+    let out = std::process::Command::new(&py)
+        .arg(&script)
+        .arg("--model").arg(&model_path)
+        .arg("--audio").arg(audio_path)
+        .arg("--language").arg("zh")
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            match serde_json::from_str::<serde_json::Value>(&s) {
+                Ok(v) => {
+                    let segs = v.get("segments")
+                        .and_then(|x| x.as_array())
+                        .map(|arr| arr.iter().filter_map(|seg| {
+                            let start = seg.get("start")?.as_f64()?;
+                            let end = seg.get("end")?.as_f64()?;
+                            let text = seg.get("text")?.as_str()?.to_string();
+                            Some(db::AsrSegment { start, end, text, confidence: 1.0 })
+                        }).collect())
+                        .unwrap_or_default();
+                    (segs, "zh".to_string(), 0.0, false, String::new())
+                }
+                Err(e) => (Vec::new(), "zh".to_string(), 0.0, true,
+                    format!("本地推理输出解析失败: {e}；stderr={}", String::from_utf8_lossy(&o.stderr))),
+            }
+        }
+        Ok(o) => (Vec::new(), "zh".to_string(), 0.0, true,
+            format!("本地推理进程失败({}): {}", o.status, String::from_utf8_lossy(&o.stderr))),
+        Err(e) => (Vec::new(), "zh".to_string(), 0.0, true,
+            format!("无法启动本地推理（请确认已安装 faster-whisper 且 python 在 PATH，或用 VF_PYTHON/VF_TRANSCRIBE_SCRIPT 指定）: {e}")),
+    }
 }
 
 /// 语音合成（TTS）：直连 XiaomiMimo /audio/speech（OpenAI 兼容，返回音频字节），写本地文件后返回路径。
@@ -742,7 +845,7 @@ async fn run_film_import(
     data_dir: &Path,
     job: &TaskJob,
     emit: Arc<dyn Fn(ProgressMsg) + Send + Sync>,
-) -> Result<bool, String> {
+) -> Result<(bool, String), String> {
     let project_id = job.project_id.clone().ok_or("film_import 缺少 projectId")?;
     let video_path = job
         .payload
@@ -786,8 +889,8 @@ async fn run_film_import(
     });
 
     // ASR（直连 XiaomiMimo /chat/completions，降级：不可达/失败不阻塞导入）
-    let (segments, _language, _duration, degraded) = if audio_path.is_empty() {
-        (Vec::new(), "zh".to_string(), 0.0, true)
+    let (segments, _language, _duration, degraded, asr_reason) = if audio_path.is_empty() {
+        (Vec::new(), "zh".to_string(), 0.0, true, "未提供音频".to_string())
     } else {
         transcribe_asr(pool, client, &audio_path).await
     };
@@ -818,7 +921,7 @@ async fn run_film_import(
         payload: Some(serde_json::json!({ "alignedPct": aligned_pct })),
     });
 
-    Ok(degraded)
+    Ok((degraded, asr_reason))
 }
 
 /// 智能粗剪：载入时间线 → 分段+对齐 → 静音检测 → 生成多轨粗剪时间线。
@@ -1435,7 +1538,7 @@ async fn run_spoken_asr(
         message: Some("语音识别(ASR)".into()),
         payload: None,
     });
-    let (segments, _lang, _dur, degraded) = transcribe_asr(pool, client, audio.to_str().unwrap()).await;
+    let (segments, _lang, _dur, degraded, _asr_reason) = transcribe_asr(pool, client, audio.to_str().unwrap()).await;
     let transcript_json = serde_json::to_string(&segments).map_err(|e| e.to_string())?;
     db::spoken_video_set_transcript(pool, &video_id, &transcript_json).await?;
     // 自动提取文案
@@ -2203,6 +2306,7 @@ pub fn build_narration_prompt(
     style: &str,
     duration_min: u32,
     asr_text: &str,
+    asr_failed: bool,
 ) -> String {
     let target_chars = duration_min * 270; // 每分钟约 270 字
     let style_hint = match style {
@@ -2217,14 +2321,18 @@ pub fn build_narration_prompt(
         "knowledge" | "知识科普" => "知识科普风格，逻辑清晰、举例说明",
         _ => "通用解说风格，叙事自然、有画面感",
     };
+    let asr_block = if asr_failed {
+        "（无法获取视频原声，请仅依据以上标题与风格自由创作一段解说文案，不要编造具体剧情细节）".to_string()
+    } else {
+        format!("视频转写（来自 ASR，可能不完整）：\n{asr_text}")
+    };
     format!(
         r#"请你为以下视频撰写一段时长约 {duration_min} 分钟的解说文案。
 视频标题：{title}
 解说风格：{style_hint}
 视频时长：{duration_min} 分钟（≈ {target_chars} 字）
 
-视频转写（来自 ASR，可能不完整）：
-{asr_text}
+{asr_block}
 
 要求：
 1. 遵循六段式故事结构：开端 → 铺垫 → 冲突 → 高潮 → 反转 → 结局
@@ -2309,13 +2417,16 @@ async fn run_film_script_gen(
     data_dir: &Path,
     job: &TaskJob,
     emit: Arc<dyn Fn(ProgressMsg) + Send + Sync>,
-) -> Result<String, String> {
+) -> Result<(String, bool, String), String> {
     let project_id = job.project_id.clone().ok_or("film_script_gen 缺少 projectId")?;
     let video_path = job.payload.get("videoPath").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let style = job.payload.get("style").and_then(|v| v.as_str()).unwrap_or("movie").to_string();
     let language = job.payload.get("language").and_then(|v| v.as_str()).unwrap_or("zh").to_string();
     let duration = job.payload.get("duration").and_then(|v| v.as_u64()).unwrap_or(180) as u32;
     let hint = job.payload.get("hint").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let title = job.payload.get("title").and_then(|v| v.as_str()).unwrap_or("未知").to_string();
+    let mut asr_failed = false;
+    let mut asr_reason = String::new();
 
     // 1) 抽音轨（如果有 videoPath）
     let asr_text = if !video_path.is_empty() && std::path::Path::new(&video_path).exists() {
@@ -2339,13 +2450,19 @@ async fn run_film_script_gen(
             message: Some("XiaomiMimo ASR 转写中".into()),
             payload: None,
         });
-        let (segments, _lang, _dur, _deg) = transcribe_asr(pool, client, audio.to_str().unwrap()).await;
-        let text: String = segments.iter().map(|s| s.text.clone()).collect::<Vec<_>>().join("");
-        if text.is_empty() {
-            // 降级 1：ASR 失败 → 用视频标题 + 风格生成
-            format!("（ASR 失败）视频标题：{}。请根据风格要求自由创作。", job.payload.get("title").and_then(|v| v.as_str()).unwrap_or("未知"))
+        let (segments, _lang, _dur, _deg, reason) = transcribe_asr(pool, client, audio.to_str().unwrap()).await;
+        asr_reason = reason;
+        let transcript: String = segments.iter().map(|s| s.text.clone()).collect::<Vec<_>>().join("");
+        if transcript.trim().is_empty() {
+            // 降级 1：ASR 失败 → 用视频标题 + 用户辅助 + 风格自由创作（不把错误原因塞给 LLM）
+            asr_failed = true;
+            let mut note = format!("视频标题：{}。", title);
+            if !hint.is_empty() {
+                note.push_str(&format!("用户补充要求：{}。", hint));
+            }
+            note
         } else {
-            text
+            transcript
         }
     } else {
         emit(ProgressMsg {
@@ -2361,10 +2478,9 @@ async fn run_film_script_gen(
 
     // 2) 章节切分（即使 LLM 成功也保留，作为降级兜底）
     let target_segments = if duration <= 120 { 3 } else if duration <= 300 { 5 } else { 6 };
-    let pre_sections = split_script_to_sections(&asr_text, duration as f64, target_segments);
+    let pre_sections = split_script_to_sections(if asr_failed { "" } else { &asr_text }, duration as f64, target_segments);
 
     // 3) LLM 六段式生成
-    let title = job.payload.get("title").and_then(|v| v.as_str()).unwrap_or("未知");
     emit(ProgressMsg {
         task_id: job.id.clone(),
         progress: 50.0,
@@ -2372,9 +2488,9 @@ async fn run_film_script_gen(
         message: Some("Agnes LLM 生成六段式文案".into()),
         payload: None,
     });
-    let (script, degraded) = match llm_provider(pool).await {
+    let (script, _degraded) = match llm_provider(pool).await {
         Ok((base_url, model, key)) => {
-            let prompt = build_narration_prompt(title, &style, duration, &asr_text);
+            let prompt = build_narration_prompt(&title, &style, duration, &asr_text, asr_failed);
             match run_llm_text(client, &base_url, &model, &key, &prompt).await {
                 Ok(text) => {
                     match parse_narration_response(&text, duration as f64, &style) {
@@ -2394,14 +2510,14 @@ async fn run_film_script_gen(
                                 }
                             }
                             let script_text: String = shots.iter().map(|s| s.text.clone()).collect::<Vec<_>>().join("\n");
-                            db::creation_project_update(pool, &project_id, None, Some(&script_text), None, Some("humanized")).await?;
+                            db::film_project_set_script(pool, &project_id, &script_text).await?;
                             (script_text, false)
                         }
                         Err(e) => {
                             // 降级 2：LLM 返回非 JSON，用 pre_sections
                             let _ = e;
                             let pre_text: String = pre_sections.iter().map(|s| s.text.clone()).collect::<Vec<_>>().join("\n");
-                            db::creation_project_update(pool, &project_id, None, Some(&pre_text), None, Some("humanized")).await?;
+                            db::film_project_set_script(pool, &project_id, &pre_text).await?;
                             (pre_text, true)
                         }
                     }
@@ -2409,18 +2525,18 @@ async fn run_film_script_gen(
                 Err(_) => {
                     // 降级 2：LLM 失败，用 ASR 切分
                     let pre_text: String = pre_sections.iter().map(|s| s.text.clone()).collect::<Vec<_>>().join("\n");
-                    db::creation_project_update(pool, &project_id, None, Some(&pre_text), None, Some("humanized")).await?;
+                    db::film_project_set_script(pool, &project_id, &pre_text).await?;
                     (pre_text, true)
                 }
             }
         }
-        Err(e) => {
+        Err(_e) => {
             // 降级 1：缺 Key
             let pre_text: String = pre_sections.iter().map(|s| s.text.clone()).collect::<Vec<_>>().join("\n");
-            db::creation_project_update(pool, &project_id, None, Some(&pre_text), None, Some("humanized")).await?;
+            db::film_project_set_script(pool, &project_id, &pre_text).await?;
             (pre_text, true)
         }
     };
     let _ = language; // 抑制 unused 警告
-    Ok(script)
+    Ok((script, asr_failed, asr_reason))
 }

@@ -1485,6 +1485,80 @@ input[type="range"]::-webkit-slider-thumb {
   letter-spacing: -0.2px;
 }
 
+/* 本地推理引擎（faster-whisper / Whisper）配置提示卡 */
+.pcard-local {
+  border: 1px dashed var(--accent-l, #e7c9b8);
+  background: var(--surface-2, rgba(184, 92, 56, 0.05));
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  margin-top: var(--space-1);
+}
+.pcard-local__badge {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-d, #8a4a2c);
+  background: var(--accent-soft, #f7e9df);
+  border: 1px solid var(--accent-l, #e7c9b8);
+  border-radius: 999px;
+  padding: 2px 10px;
+  margin-bottom: var(--space-3);
+}
+.pcard-local__path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: var(--space-3);
+}
+.pcard-local__path code {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono, 'Geist Mono', monospace);
+  font-size: 12.5px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  color: var(--ink-2);
+  word-break: break-all;
+}
+.pcard-local__hint {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--ink-2);
+}
+.pcard-local__hint b { color: var(--accent); }
+
+/* 本地模型下载区 */
+.local-dl {
+  border-top: 1px dashed var(--line);
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+}
+.dl-progress {
+  background: var(--surface-2, rgba(0, 0, 0, 0.05));
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  height: 10px;
+  overflow: hidden;
+}
+.dl-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent, #b85c38), var(--accent-d, #8a4a2c));
+  transition: width 0.2s ease;
+}
+.tag.ok {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #1f7a3d;
+  background: rgba(31, 122, 61, 0.12);
+  border: 1px solid rgba(31, 122, 61, 0.4);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+
 .prompt-list { display: flex; flex-direction: column; gap: var(--space-1); }
 .prompt-item {
   padding: var(--space-3);
@@ -1917,12 +1991,13 @@ input[type="range"]::-webkit-slider-thumb {
 /* 步骤 1：开始界面（紫渐变 · 在主区里渲染，不脱离文档流，避免盖住 App 侧栏） */
 .film-step1-splash {
   position: relative;
-  width: 100%; height: 100%;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  width: 100%; min-height: 64vh;
+  background: linear-gradient(150deg, var(--ink) 0%, var(--accent-d) 58%, var(--accent) 100%);
   display: flex; align-items: center; justify-content: center;
-  color: #fff;
-  border-radius: 12px;
+  color: var(--paper);
+  border-radius: var(--radius-xl);
   overflow: hidden;
+  box-shadow: var(--shadow-lg);
 }
 .film-step1-splash__bg {
   position: absolute; inset: 0;
@@ -1933,36 +2008,37 @@ input[type="range"]::-webkit-slider-thumb {
   position: relative; z-index: 1; text-align: left; max-width: 720px; padding: 40px;
 }
 .film-step1-splash__title {
-  font-size: 56px; font-weight: 800; font-family: "Fraunces", serif;
+  font-size: 56px; font-weight: 800; font-family: var(--font-display);
   margin-bottom: 16px; line-height: 1.15; letter-spacing: -1px;
-  text-shadow: 0 4px 20px rgba(0,0,0,0.2);
+  text-shadow: 0 4px 20px rgba(0,0,0,0.25);
 }
 .film-step1-splash__subtitle { font-size: 18px; opacity: 0.92; margin-bottom: 40px; line-height: 1.5; }
 .film-step1-splash__btn {
   display: inline-flex; align-items: center; gap: 10px;
-  padding: 14px 36px; background: #fff; color: #764ba2;
+  padding: 14px 36px; background: var(--paper); color: var(--accent-d);
   border: none; border-radius: 999px; font-size: 17px; font-weight: 600;
   cursor: pointer; transition: all 0.2s;
-  box-shadow: 0 8px 30px rgba(0,0,0,0.18);
+  box-shadow: 0 8px 30px rgba(0,0,0,0.22);
   font-family: inherit;
 }
 .film-step1-splash__btn:hover { transform: translateY(-2px); box-shadow: 0 12px 40px rgba(0,0,0,0.25); }
 .film-step1-splash__btn-icon { font-size: 20px; }
 
 /* 步骤 2/3/5/6 通用：顶部 + 标题 */
-.film-step2, .film-step3, .film-step5, .film-step6 { padding: 32px 24px; min-height: 100%; }
+.film-step2, .film-step3, .film-step5, .film-step6 { padding: 0; min-height: 100%; }
 .film-step2__top, .film-step3__top { margin-bottom: 20px; }
 .film-step2__back {
-  background: transparent; border: 1px solid #d6c9b3; padding: 6px 14px;
-  border-radius: 999px; font-size: 13px; color: #6b6359; cursor: pointer;
-  font-family: inherit;
+  background: transparent; border: 1px solid var(--line); padding: 6px 14px;
+  border-radius: var(--radius-full); font-size: 13px; color: var(--ink-2); cursor: pointer;
+  font-family: inherit; transition: all var(--dur-fast);
 }
+.film-step2__back:hover { border-color: var(--accent); color: var(--accent); }
 .film-step2__header, .film-step3__header { margin-bottom: 24px; }
 .film-step2__header h1, .film-step3__header h1 {
-  font-size: 32px; font-weight: 800; font-family: "Fraunces", serif; color: #2d1810;
-  margin-bottom: 8px;
+  font-size: 32px; font-weight: 800; font-family: var(--font-display); color: var(--ink);
+  margin-bottom: 8px; letter-spacing: -0.5px;
 }
-.film-step2__subtitle { font-size: 14px; color: #6b6359; }
+.film-step2__subtitle { font-size: 14px; color: var(--ink-3); }
 
 /* 步骤 2：9 个渐变卡片 */
 .film-step2__grid {
@@ -1971,16 +2047,17 @@ input[type="range"]::-webkit-slider-thumb {
 }
 @media (max-width: 900px) { .film-step2__grid { grid-template-columns: repeat(2, 1fr); } }
 .film-step2-card {
-  border-radius: 14px; padding: 32px 24px; min-height: 140px;
-  display: flex; flex-direction: column; justify-content: center; align-items: center;
-  color: #fff; cursor: pointer; transition: all 0.2s;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.12); text-align: center;
+  border-radius: var(--radius-lg); padding: 22px 20px; min-height: 132px;
+  display: flex; flex-direction: column; justify-content: center; align-items: flex-start;
+  background: var(--card); border: 1px solid var(--line); border-top: 4px solid var(--accent);
+  color: var(--ink); cursor: pointer; transition: all var(--dur-fast);
+  box-shadow: var(--shadow-sm); text-align: left;
 }
-.film-step2-card:hover { transform: translateY(-3px); box-shadow: 0 8px 28px rgba(0,0,0,0.2); }
-.film-step2-card__name { font-size: 22px; font-weight: 700; margin-bottom: 8px; font-family: "Fraunces", serif; }
-.film-step2-card__desc { font-size: 13px; opacity: 0.92; }
-.film-step2-card--more { opacity: 0.7; }
-.film-step2-card--more:hover { opacity: 0.95; }
+.film-step2-card:hover { transform: translateY(-3px); box-shadow: var(--shadow-lg); border-color: var(--line); }
+.film-step2-card__name { font-size: 19px; font-weight: 700; margin-bottom: 6px; font-family: var(--font-display); color: var(--ink); }
+.film-step2-card__desc { font-size: 12px; color: var(--ink-3); line-height: 1.5; }
+.film-step2-card--more { opacity: 0.85; }
+.film-step2-card--more:hover { opacity: 1; }
 
 /* 步骤 3：上传影片巨型 dropzone */
 .film-step3__card {
@@ -1989,6 +2066,7 @@ input[type="range"]::-webkit-slider-thumb {
   text-align: center; cursor: pointer; transition: all 0.2s; color: #2d1810;
 }
 .film-step3__card:hover { border-color: #b85c38; background: rgba(184,92,56,0.05); }
+.film-step3__card--dragover { border-color: #b85c38; background: rgba(184,92,56,0.1); border-style: solid; transform: scale(1.01); }
 .film-step3__icon { font-size: 72px; margin-bottom: 16px; }
 .film-step3__title { font-size: 18px; font-weight: 600; margin-bottom: 8px; font-family: "Fraunces", serif; }
 .film-step3__desc { font-size: 13px; color: #6b6359; margin-bottom: 20px; }
@@ -2001,149 +2079,302 @@ input[type="range"]::-webkit-slider-thumb {
 
 /* 步骤 4：设置视频范围模态 */
 .film-step4__preview {
-  background: #141110; border-radius: 10px; padding: 40px 20px;
-  text-align: center; color: #6b6359; position: relative;
+  background: var(--ink); border-radius: var(--radius-lg); padding: 0; overflow: hidden;
+  position: relative; aspect-ratio: 16 / 9; max-height: 260px; display: flex;
 }
-.film-step4__video { height: 60px; display: flex; align-items: center; justify-content: center; color: #4a3e30; }
+.film-step4__video-el {
+  width: 100%; height: 100%; object-fit: contain; background: #000;
+  cursor: pointer; display: block;
+}
+.film-step4__video-err {
+  margin: auto; padding: 24px; text-align: center; color: var(--paper-3);
+  font-size: 13px; line-height: 1.7;
+}
+.film-step4__play {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 56px; height: 56px; border-radius: 50%; background: rgba(26,24,20,0.55);
+  color: var(--paper); display: flex; align-items: center; justify-content: center;
+  font-size: 22px; cursor: pointer; pointer-events: none; transition: opacity 0.2s;
+}
+.film-step4__preview--error .film-step4__play { display: none; }
 .film-step4__timecode {
-  position: absolute; bottom: 12px; right: 20px; font-family: "Geist Mono", monospace;
-  font-size: 12px; color: #aaa;
+  position: absolute; bottom: 10px; right: 14px; font-family: var(--font-mono);
+  font-size: 12px; color: var(--paper); background: rgba(26,24,20,0.5);
+  padding: 2px 8px; border-radius: var(--radius-sm);
 }
-.film-step4__range { position: relative; height: 16px; margin: 16px 0; }
+.film-step4__range { position: relative; height: 22px; margin: 18px 0 10px; touch-action: none; cursor: pointer; }
 .film-step4__range-track {
-  position: absolute; top: 7px; left: 0; right: 0; height: 2px;
-  background: #d6c9b3; border-radius: 1px;
+  position: absolute; top: 10px; left: 0; right: 0; height: 3px;
+  background: var(--line-2); border-radius: 2px;
 }
 .film-step4__range-selected {
-  position: absolute; top: 5px; height: 6px;
-  background: linear-gradient(90deg, #6b8cff, #4ecdc4);
-  border-radius: 3px;
+  position: absolute; top: 7px; height: 9px; left: 0; width: 0;
+  background: linear-gradient(90deg, var(--accent-d), var(--accent-l));
+  border-radius: 5px; cursor: grab;
 }
+.film-step4__range-selected:active { cursor: grabbing; }
 .film-step4__range-handle {
-  position: absolute; top: 0; width: 16px; height: 16px;
-  background: #fff; border: 2px solid #6b8cff; border-radius: 50%;
-  transform: translateX(-50%); cursor: ew-resize;
+  position: absolute; top: 2px; width: 18px; height: 18px;
+  background: var(--paper); border: 3px solid var(--accent); border-radius: 50%;
+  transform: translateX(-50%); cursor: ew-resize; box-shadow: var(--shadow-sm); touch-action: none;
 }
-.film-step4__time-labels { display: flex; justify-content: space-between; margin-bottom: 16px; }
+.film-step4__range-handle:hover { border-color: var(--accent-d); }
+.film-step4__time-labels { display: flex; justify-content: space-between; margin-bottom: 14px; gap: 8px; }
 .film-step4__time-block { text-align: center; flex: 1; }
-.film-step4__time-value { font-size: 16px; font-weight: 600; color: #2d1810; font-family: "Geist Mono", monospace; }
+.film-step4__time-value { font-size: 16px; font-weight: 600; color: var(--ink-2); font-family: var(--font-mono); }
+.film-step4__inputs { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.film-step4__input {
+  width: 92px; padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  font-family: var(--font-mono); font-size: 14px; color: var(--ink); background: var(--card); text-align: center;
+}
+.film-step4__input:focus { outline: none; border-color: var(--accent); }
+.film-step4__quick { display: flex; gap: 8px; flex-wrap: wrap; }
+.film-step4__fine { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.film-step4__hint { margin-top: 12px; font-size: 12px; color: var(--ink-3); text-align: center; }
+.narrative-modal .btn.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* 步骤 5：视频解说功能 */
 .film-step5__tabs { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 16px; }
 .film-step5__tab {
-  padding: 8px 18px; border-radius: 8px; border: 1px solid #d6c9b3;
-  background: #fff; color: #6b6359; cursor: pointer; font-size: 13px;
-  font-family: inherit; transition: all 0.2s;
+  padding: 8px 18px; border-radius: var(--radius-sm); border: 1px solid var(--line);
+  background: var(--card); color: var(--ink-2); cursor: pointer; font-size: 13px;
+  font-family: inherit; transition: all var(--dur-fast);
 }
-.film-step5__tab:hover { border-color: #b85c38; }
-.film-step5__tab.active { background: #6b8cff; color: #fff; border-color: #6b8cff; }
+.film-step5__tab:hover { border-color: var(--accent); color: var(--ink); }
+.film-step5__tab.active { background: var(--accent); color: var(--paper); border-color: var(--accent); }
 .film-step5__hero {
-  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-  border-radius: 12px; padding: 24px; margin-bottom: 16px;
-  text-align: center; color: #fff;
+  background: linear-gradient(135deg, var(--paper-2) 0%, var(--card) 100%);
+  border: 1px solid var(--line); border-left: 4px solid var(--accent);
+  border-radius: var(--radius-lg); padding: 28px 24px; margin-bottom: 16px;
+  text-align: center; color: var(--ink);
+  box-shadow: var(--shadow-sm);
 }
 .film-step5__hero-title {
-  font-size: 28px; font-weight: 800; font-family: "Fraunces", serif;
-  background: linear-gradient(135deg, #fff, #a8b8ff);
-  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  font-size: 28px; font-weight: 700; font-family: var(--font-display);
+  color: var(--ink); letter-spacing: -0.5px;
 }
 .film-step5__file-card {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 16px; background: #fff; border: 1px solid #d6c9b3;
-  border-radius: 10px; margin-bottom: 16px;
+  padding: 12px 16px; background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius-md); margin-bottom: 16px;
 }
 .film-step5__file-info { display: flex; align-items: center; gap: 12px; }
 .film-step5__file-icon { font-size: 32px; }
-.film-step5__file-name { font-size: 14px; font-weight: 600; color: #2d1810; }
-.film-step5__file-duration { font-size: 12px; color: #6b6359; }
-.film-step5__mode-tabs { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; }
+.film-step5__file-name { font-size: 14px; font-weight: 600; color: var(--ink); }
+.film-step5__file-duration { font-size: 12px; color: var(--ink-3); }
+.film-step5__mode-tabs { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
 .film-step5__mode-tab {
-  padding: 8px 18px; border-radius: 8px; border: 1px solid #d6c9b3;
-  background: #fff; color: #2d1810; cursor: pointer; font-size: 13px;
-  font-weight: 500; font-family: inherit;
+  padding: 8px 18px; border-radius: var(--radius-sm); border: 1px solid var(--line);
+  background: var(--card); color: var(--ink); cursor: pointer; font-size: 13px;
+  font-weight: 500; font-family: inherit; transition: all var(--dur-fast);
 }
-.film-step5__mode-tab.active { background: #6b8cff; color: #fff; border-color: #6b8cff; }
-.film-step5__mode-tag { margin-left: auto; font-size: 11px; color: #aaa; }
+.film-step5__mode-tab.active { background: var(--accent); color: var(--paper); border-color: var(--accent); }
+.film-step5__mode-tag { margin-left: auto; font-size: 11px; color: var(--ink-3); }
 .film-step5__styles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
 .film-step5__style {
-  padding: 10px 12px; border: 1px solid #d6c9b3; border-radius: 8px;
-  background: #fff; color: #2d1810; cursor: pointer; transition: all 0.2s;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--card); color: var(--ink); cursor: pointer; transition: all var(--dur-fast);
   font-size: 12px; text-align: center;
 }
-.film-step5__style:hover { border-color: #b85c38; }
-.film-step5__style.active { border-color: #6b8cff; background: #eef6ff; }
+.film-step5__style:hover { border-color: var(--accent); }
+.film-step5__style.active { border-color: var(--accent); background: var(--accent-soft); }
 .film-step5__style-name { font-weight: 600; }
-.film-step5__style-desc { font-size: 10px; color: #6b6359; margin-top: 4px; }
-.film-step5__style--custom { color: #b85c38; }
+.film-step5__style-desc { font-size: 10px; color: var(--ink-3); margin-top: 4px; }
+.film-step5__style--custom { color: var(--accent); }
 .film-step5__view { display: flex; gap: 8px; }
 .film-step5__view .pill {
-  padding: 6px 16px; border: 1px solid #d6c9b3; border-radius: 999px;
-  background: #fff; color: #2d1810; cursor: pointer; font-size: 12px;
-  font-family: inherit;
+  padding: 6px 16px; border: 1px solid var(--line); border-radius: var(--radius-full);
+  background: var(--paper); color: var(--ink-2); cursor: pointer; font-size: 12px;
+  font-family: inherit; transition: all var(--dur-fast);
 }
-.film-step5__view .pill.active { background: #6b8cff; color: #fff; border-color: #6b8cff; }
+.film-step5__view .pill.active { background: var(--accent); color: var(--paper); border-color: var(--accent); }
 .film-step5__lang { display: flex; align-items: center; gap: 12px; }
 .film-step5__durations { display: flex; gap: 6px; flex-wrap: wrap; }
 .film-step5__durations .pill {
-  padding: 6px 14px; border: 1px solid #d6c9b3; border-radius: 6px;
-  background: #fff; color: #2d1810; cursor: pointer; font-size: 12px;
-  font-family: inherit;
+  padding: 6px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--paper); color: var(--ink-2); cursor: pointer; font-size: 12px;
+  font-family: inherit; transition: all var(--dur-fast);
 }
-.film-step5__durations .pill.active { background: #6b8cff; color: #fff; border-color: #6b8cff; }
+.film-step5__durations .pill.active { background: var(--accent); color: var(--paper); border-color: var(--accent); }
 .film-step5__settings { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 16px 0; }
-.film-step5__setting-card { background: #fff; border: 1px solid #d6c9b3; border-radius: 10px; padding: 12px; }
-.film-step5__setting-title { font-size: 12px; font-weight: 600; color: #2d1810; margin-bottom: 6px; }
+.film-step5__setting-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 12px; }
+.film-step5__setting-title { font-size: 12px; font-weight: 600; color: var(--ink); margin-bottom: 6px; }
 .film-step5__setting-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
 .film-step5__start { width: 100%; padding: 14px; font-size: 15px; margin-top: 16px; }
-.film-step5__placeholder { text-align: center; padding: 80px 20px; color: #6b6359; }
+.film-step5__placeholder { text-align: center; padding: 80px 20px; color: var(--ink-3); }
 
-/* 步骤 6：分镜工作台 */
-.film-step6__toolbar { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; }
-.film-step6__tool {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 6px 12px; border: 1px solid #2a2a3e; border-radius: 6px;
-  background: #141420; color: #aaa; font-size: 12px; cursor: pointer;
-  font-family: inherit; transition: all 0.2s;
+/* 生成结果展示面板 */
+.film-step5__result {
+  margin-top: 20px; padding: 18px; border: 1px solid var(--line);
+  border-radius: var(--radius-lg); background: var(--card);
+  box-shadow: var(--shadow-sm);
 }
-.film-step6__tool:hover { background: #1a1a2e; color: #fff; border-color: #444; }
-.film-step6__tool--primary { background: linear-gradient(90deg, #2ecc71, #27ae60); color: #fff; border-color: transparent; }
-.film-step6__tool--primary:hover { opacity: 0.9; }
+.film-step5__result-head {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 10px; margin-bottom: 14px;
+}
+.film-step5__result-title {
+  font-family: var(--font-display); font-size: 18px; font-weight: 600;
+  color: var(--accent-d);
+}
+.film-step5__chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.film-step5__chips .chip {
+  font-size: 12px; padding: 3px 10px; border-radius: var(--radius-full);
+  background: var(--accent-soft); color: var(--accent-d);
+  border: 1px solid var(--accent-l);
+}
+.film-step5__script {
+  white-space: pre-wrap; word-break: break-word; line-height: 1.75;
+  font-size: 14px; color: var(--ink-2);
+  max-height: 340px; overflow-y: auto; padding: 14px;
+  background: var(--paper-2); border-radius: var(--radius-md);
+  border: 1px solid var(--line-2);
+}
+.film-step5__result-actions { display: flex; gap: 10px; margin-top: 14px; }
+.film-step5__warn {
+  margin-bottom: 14px; padding: 12px 14px; border-radius: var(--radius-md);
+  background: #fdf3e7; border: 1px solid var(--accent-l); color: var(--accent-d);
+  font-size: 13px; line-height: 1.6;
+}
+.film-step5__warn b { color: var(--accent); }
+.film-step5__warn-reason {
+  margin-top: 8px; padding: 8px 10px; border-radius: var(--radius-sm);
+  background: #fff6ec; border-left: 3px solid var(--accent);
+  font-size: 12.5px; color: var(--accent-d); word-break: break-word;
+}
+
+/* 步骤 6：分镜工作台（Editorial 亮色） */
+.film-step6__toolbar { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.film-step6__tool {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 7px 13px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--card); color: var(--ink-2); font-size: 12px; cursor: pointer;
+  font-family: inherit; transition: all var(--dur-fast);
+}
+.film-step6__tool:hover { background: var(--paper-3); color: var(--ink); border-color: var(--ink-3); }
+.film-step6__tool--primary { background: var(--accent); color: var(--paper); border-color: var(--accent); }
+.film-step6__tool--primary:hover { background: var(--accent-d); border-color: var(--accent-d); }
 .film-step6__tool-icon { font-size: 14px; }
 .film-step6__progress {
-  background: rgba(255,255,255,0.04); border: 1px solid #2a2a3e; border-radius: 6px;
-  padding: 8px 12px; margin-bottom: 12px; font-size: 12px;
+  background: var(--accent-soft); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px; margin-bottom: 12px; font-size: 12px; color: var(--ink-2);
 }
-.film-step6__main { display: grid; grid-template-columns: 360px 1fr; gap: 12px; }
+.film-step6__main { display: flex; flex-direction: column; gap: 12px; }
 .film-step6__left { display: flex; flex-direction: column; }
 .film-step6__video {
-  background: #141420; border: 1px solid #2a2a3e; border-radius: 8px;
+  background: var(--paper-2); border: 1px solid var(--line); border-radius: var(--radius-md);
   flex: 1; display: flex; flex-direction: column; padding: 8px;
-  color: #888; min-height: 280px;
+  color: var(--ink-3); min-height: 280px;
 }
-.film-step6__video-frame { flex: 1; display: flex; align-items: center; justify-content: center; background: #0a0a12; border-radius: 4px; font-size: 12px; }
-.film-step6__timeline { height: 6px; background: #1a1a2e; border-radius: 3px; margin: 8px 0; position: relative; }
-.film-step6__timeline-handle { position: absolute; top: 0; left: 0; width: 6px; height: 100%; background: linear-gradient(90deg, #ff6b9d, #6b8cff); border-radius: 3px; }
-.film-step6__video-meta { font-size: 11px; color: #555; padding: 0 4px; }
+.film-step6__video-frame { flex: 1; display: flex; align-items: center; justify-content: center; background: var(--ink); border-radius: var(--radius-sm); font-size: 12px; color: var(--paper); }
+.film-step6__timeline { height: 6px; background: var(--line); border-radius: 3px; margin: 8px 0; position: relative; }
+.film-step6__timeline-handle { position: absolute; top: 0; left: 0; width: 6px; height: 100%; background: var(--accent); border-radius: 3px; }
+.film-step6__video-meta { font-size: 11px; color: var(--ink-3); padding: 0 4px; }
 .film-step6__video-meta > div { padding: 2px 0; }
 .film-step6__right { display: flex; flex-direction: column; }
-.film-step6__script-header { display: flex; justify-content: space-between; padding: 8px 12px; background: #141420; border: 1px solid #2a2a3e; border-radius: 6px 6px 0 0; font-size: 13px; color: #fff; }
-.film-step6__table-wrap { background: #0a0a12; border: 1px solid #2a2a3e; border-top: none; border-radius: 0 0 6px 6px; max-height: 480px; overflow-y: auto; }
-.film-step6__table { width: 100%; border-collapse: collapse; font-size: 12px; color: #e0e0e0; }
-.film-step6__table th { background: #1a1a2e; padding: 8px 6px; text-align: left; font-weight: 600; font-size: 11px; color: #888; position: sticky; top: 0; }
-.film-step6__table td { padding: 6px 8px; border-top: 1px solid #1a1a2e; }
-.film-step6__time { font-family: "Geist Mono", monospace; color: #6b8cff; }
+.film-step6__script-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: var(--paper-2); border: 1px solid var(--line); border-radius: var(--radius-sm) var(--radius-sm) 0 0; font-size: 13px; color: var(--ink); font-weight: 600; }
+.film-step6__table-wrap { background: var(--card); border: 1px solid var(--line); border-top: none; border-radius: 0 0 var(--radius-sm) var(--radius-sm); max-height: 480px; overflow-y: auto; }
+.film-step6__table { width: 100%; border-collapse: collapse; font-size: 12px; color: var(--ink-2); }
+.film-step6__table th { background: var(--paper-3); padding: 9px 8px; text-align: left; font-weight: 600; font-size: 11px; color: var(--ink-3); position: sticky; top: 0; border-bottom: 1px solid var(--line); }
+.film-step6__table td { padding: 7px 8px; border-top: 1px solid var(--line-2); }
+.film-step6__table tbody tr { transition: background var(--dur-fast); }
+.film-step6__table tbody tr:hover { background: var(--paper-3); }
+.film-step6__time { font-family: var(--font-mono); color: var(--accent); }
 .film-step6__mini-btn {
-  padding: 3px 8px; font-size: 10px; background: #1a1a2e; color: #6b8cff;
-  border: 1px solid #2a2a3e; border-radius: 4px; cursor: pointer; font-family: inherit;
+  padding: 3px 8px; font-size: 10px; background: var(--paper); color: var(--accent);
+  border: 1px solid var(--line); border-radius: var(--radius-xs); cursor: pointer; font-family: inherit;
+  transition: all var(--dur-fast);
 }
+.film-step6__mini-btn:hover { background: var(--accent-soft); border-color: var(--accent); }
 .film-step6__icon-btn {
-  padding: 2px 5px; background: transparent; border: none; color: #888;
-  cursor: pointer; font-size: 13px; font-family: inherit;
+  padding: 2px 5px; background: transparent; border: none; color: var(--ink-3);
+  cursor: pointer; font-size: 13px; font-family: inherit; border-radius: var(--radius-xs);
+  transition: all var(--dur-fast);
 }
-.film-step6__icon-btn:hover { color: #fff; }
-.film-step6__bottom { display: flex; align-items: center; justify-content: space-between; margin-top: 16px; padding: 12px 14px; background: #141420; border: 1px solid #2a2a3e; border-radius: 6px; }
-.film-step6__bottom-opts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.film-step6__icon-btn:hover { color: var(--accent); background: var(--accent-soft); }
+.film-step6__bottom { display: flex; align-items: center; justify-content: space-between; margin-top: 16px; padding: 12px 14px; background: var(--paper-2); border: 1px solid var(--line); border-radius: var(--radius-sm); flex-wrap: wrap; gap: 12px; }
+.film-step6__bottom-opts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); }
 .film-step6__bottom-opts select { max-width: 140px; padding: 4px 8px; }
-.film-step6__check { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #888; }
-.film-step6__bottom-exports { display: flex; gap: 8px; }
+.film-step6__check { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--ink-3); }
+.film-step6__bottom-exports { display: flex; gap: 8px; flex-wrap: wrap; }
 .film-step6__export-btn { padding: 8px 16px; }
+
+/* ===== 影视流程：常驻 5 阶段指示器 + 容器 ===== */
+.film-flow { display: flex; flex-direction: column; gap: 18px; min-height: 100%; }
+.film-flow__body { min-height: 0; }
+
+.film-stepper {
+  display: flex; align-items: center;
+  padding: 12px 18px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  position: sticky; top: 0; z-index: 5;
+}
+.film-stepper__item {
+  display: flex; align-items: center; flex: 1; min-width: 0;
+}
+.film-stepper__item:last-child { flex: 0 0 auto; }
+.film-stepper__node {
+  flex: 0 0 auto;
+  width: 30px; height: 30px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 700; font-family: var(--font-mono);
+  border: 2px solid var(--line); background: var(--paper-2); color: var(--ink-3);
+  transition: all var(--dur-fast);
+}
+.film-stepper__label {
+  display: flex; align-items: center; gap: 7px;
+  margin-left: 10px; font-size: 13px; font-weight: 600; color: var(--ink-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.film-stepper__ic { color: inherit; opacity: 0.85; flex: 0 0 auto; }
+.film-stepper__line {
+  flex: 1; height: 2px; margin: 0 14px;
+  background: var(--line); border-radius: 1px;
+  transition: background var(--dur-fast);
+}
+/* 已完成 */
+.film-stepper__item.done .film-stepper__node {
+  background: var(--accent); border-color: var(--accent); color: var(--paper);
+}
+.film-stepper__item.done .film-stepper__label { color: var(--ink-2); }
+.film-stepper__item.done .film-stepper__line { background: var(--accent); }
+/* 进行中 */
+.film-stepper__item.active .film-stepper__node {
+  background: var(--accent-soft); border-color: var(--accent); color: var(--accent-d);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+.film-stepper__item.active .film-stepper__label { color: var(--accent-d); }
+/* 未开始 */
+.film-stepper__item.todo .film-stepper__node { background: var(--paper-2); }
+
+@media (max-width: 640px) {
+  .film-stepper { padding: 10px 12px; }
+  .film-stepper__label { margin-left: 6px; }
+  .film-stepper__label > span:last-child { display: none; }
+  .film-stepper__line { margin: 0 8px; }
+  .film-stepper__node { width: 26px; height: 26px; }
+}
+
+/* ===== 通用表单工具类（影视 / 口播等模块复用） ===== */
+.form-row { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+.form-row > .form-label { flex: 0 0 118px; padding-top: 9px; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.form-row > :not(.form-label) { flex: 1; min-width: 0; }
+.form-label { display: block; }
+.form-select, .form-textarea, .form-input {
+  width: 100%; padding: 9px 12px; font-family: inherit; font-size: 13px;
+  color: var(--ink); background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); transition: border-color var(--dur-fast), box-shadow var(--dur-fast);
+}
+.form-select { cursor: pointer; }
+.form-textarea { resize: vertical; line-height: 1.5; }
+.form-select:focus, .form-textarea:focus, .form-input:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+}
+@media (max-width: 560px) {
+  .form-row { flex-direction: column; gap: 8px; }
+  .form-row > .form-label { flex: none; padding-top: 0; }
+}

@@ -1,5 +1,7 @@
-// 步骤 2：选择视频类型（9 个渐变彩色卡片）
+// 步骤 2：选择视频类型（9 个 Editorial 大地色卡片）
 // v2.0 重构：替代 v1.0 的 5 个影片类型侧栏
+// 配色统一采用 Editorial 设计系统的低饱和大地色（赭石 / 茶绿 / 陶土 / 苔绿…），
+// 通过卡片顶部 4px 强调色条区分类型，保持与整体系统风格一致。
 
 interface Props {
   onPick: (styleId: string, styleName: string) => void;
@@ -7,15 +9,15 @@ interface Props {
 }
 
 const STYLES = [
-  { id: 'movie',        name: '电影解说',   desc: '抖音爆款电影·解说风格',         from: '#667eea', to: '#764ba2' },
-  { id: 'series',       name: '电视剧解说', desc: '追剧向电视剧解说',               from: '#a18cd1', to: '#fbc2eb' },
-  { id: 'variety',      name: '综艺解说',   desc: '综艺节目精彩片段解说',           from: '#f093fb', to: '#f5576c' },
-  { id: 'anime',        name: '动漫解说',   desc: '番剧/动漫解说',                 from: '#4facfe', to: '#00f2fe' },
-  { id: 'shortdrama',   name: '短剧解说',   desc: '竖屏短剧解说',                   from: '#fa709a', to: '#fee140' },
-  { id: 'sports',       name: '体育解说',   desc: '体育赛事精彩解说',               from: '#43e97b', to: '#38f9d7' },
-  { id: 'documentary',  name: '纪录片解说', desc: '纪录片/科普解说',                 from: '#0ba360', to: '#3cba92' },
-  { id: 'general',      name: '通用解说',   desc: '通用视频解说',                   from: '#a8edea', to: '#fed6e3' },
-  { id: '__more__',     name: '更多风格',   desc: '敬请期待...',                     from: '#e0c3fc', to: '#8ec5fc' },
+  { id: 'movie',        name: '电影解说',   desc: '抖音爆款电影·解说风格',         accent: '#b85c38' },
+  { id: 'series',       name: '电视剧解说', desc: '追剧向电视剧解说',               accent: '#9c4828' },
+  { id: 'variety',      name: '综艺解说',   desc: '综艺节目精彩片段解说',           accent: '#6b7a4b' },
+  { id: 'anime',        name: '动漫解说',   desc: '番剧/动漫解说',                 accent: '#5b8a8a' },
+  { id: 'shortdrama',   name: '短剧解说',   desc: '竖屏短剧解说',                   accent: '#c0883e' },
+  { id: 'sports',       name: '体育解说',   desc: '体育赛事精彩解说',               accent: '#7a6b3b' },
+  { id: 'documentary',  name: '纪录片解说', desc: '纪录片/科普解说',                 accent: '#566b4b' },
+  { id: 'general',      name: '通用解说',   desc: '通用视频解说',                   accent: '#8a7a64' },
+  { id: '__more__',     name: '更多风格',   desc: '敬请期待...',                     accent: '#a89a86' },
 ];
 
 export default function Step2PickStyle({ onPick, onBack }: Props) {
@@ -33,7 +35,7 @@ export default function Step2PickStyle({ onPick, onBack }: Props) {
           <div
             key={s.id}
             className={'film-step2-card' + (s.id === '__more__' ? ' film-step2-card--more' : '')}
-            style={{ background: `linear-gradient(135deg, ${s.from}, ${s.to})` }}
+            style={{ borderTopColor: s.accent }}
             onClick={() => onPick(s.id, s.name)}
           >
             <div className="film-step2-card__name">{s.name}</div>

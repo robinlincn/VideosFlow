@@ -130,6 +130,8 @@ export interface CreationState {
 export interface ProviderCfg {
   name: string; provider: string; baseUrl: string; apiKey: string;
   model: string; enabled: boolean; test: string; hasKey: boolean;
+  /** 运行模式：'cloud'（默认，云端 API）或 'local'（本地推理） */
+  mode?: 'cloud' | 'local';
 }
 export interface PromptCfg { name: string; body: string; placeholder: string; }
 export interface SettingsState {

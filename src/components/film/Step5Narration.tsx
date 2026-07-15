@@ -4,7 +4,7 @@
 import { useState } from 'react';
 import { submitFilmScriptGen } from '../../ipc/providers';
 import { useApp } from '../../state/AppContext';
-import type { ProgressMsg } from '../../ipc/types';
+import type { ProgressMsg, FilmScriptGenOptions } from '../../ipc/types';
 
 interface Props {
   videoPath: string;
@@ -14,8 +14,10 @@ interface Props {
   rangeEnd: number;
   styleId: string;
   styleName: string;
+  projectId: string;
   onGenerated: (script: string) => void;
   onBack: () => void;
+  onGotoStoryboard: () => void;
 }
 
 const DURATIONS = [
@@ -41,7 +43,7 @@ const STYLES = [
 
 export default function Step5Narration({
   videoPath, videoName, videoDuration, rangeStart, rangeEnd,
-  styleId, styleName, onGenerated, onBack,
+  styleId, styleName, projectId, onGenerated, onBack, onGotoStoryboard,
 }: Props) {
   const { state, actions } = useApp();
   const { settingsState } = state;
@@ -60,46 +62,50 @@ export default function Step5Narration({
 
   // 顶部切换：解说工作台 ↔ 分镜工作台
   const [topTab, setTopTab] = useState<'narration' | 'storyboard'>('narration');
+  const [result, setResult] = useState<string | null>(null);
+  const [asrFailed, setAsrFailed] = useState(false);
+  const [asrReason, setAsrReason] = useState('');
 
   const submitGen = async () => {
     setBusy(true);
-    setTaskPct(15);
-    setTaskMsg('抽取音轨');
+    setAsrFailed(false);
+    setAsrReason('');
+    setTaskPct(10);
+    setTaskMsg('准备生成');
     try {
-      // 找当前 editingProj（步骤 3 已创建，但步骤 4 之前先要落到 film_projects）
-      const proj = state.editingProj;
-      if (!proj) {
-        // 兜底：没工程时降级为占位
-        const fallback = buildFallbackScript(videoName, styleName, DURATION_TO_MIN[duration] || 3);
-        setTimeout(() => {
-          setBusy(false);
-          onGenerated(fallback);
-        }, 1000);
-        return;
-      }
       const targetMin = DURATION_TO_MIN[duration] || 3;
-      const minutes = Math.min(10, Math.max(1, targetMin));
-      actions.task(`开始生成解说 · ${videoName} · 风格：${styleName} · ${minutes} 分钟`, 30);
-      await submitFilmScriptGen(proj.id, (m: ProgressMsg) => {
+      const seconds = Math.round(targetMin * 60);
+      const opts: FilmScriptGenOptions = {
+        videoPath: videoPath || '',
+        title: videoName || styleName || '未命名视频',
+        style,
+        language,
+        duration: seconds,
+        hint,
+      };
+      setTaskPct(15);
+      setTaskMsg('抽取音轨');
+      await submitFilmScriptGen(projectId, opts, (m: ProgressMsg) => {
         setTaskPct(m.progress);
         setTaskMsg(m.message || '');
         if (m.status === 'done') {
-          const script = (m.payload as any)?.script || '';
+          const payload = m.payload as any;
+          const script = payload?.script || '';
+          setAsrFailed(!!payload?.asrFailed);
+          setAsrReason(payload?.asrReason || '');
           setBusy(false);
-          actions.task('解说生成完成 ✓', 100);
-          onGenerated(script);
+          setResult(script);
         } else if (m.status === 'failed') {
           // 降级占位
-          const fallback = buildFallbackScript(videoName, styleName, minutes);
+          const fallback = buildFallbackScript(videoName, styleName, targetMin);
           setBusy(false);
-          onGenerated(fallback);
-          actions.task('生成失败，使用降级文案：' + (m.message || ''), 100);
+          setResult(fallback);
         }
       });
     } catch (e) {
       setBusy(false);
       const fallback = buildFallbackScript(videoName, styleName, 3);
-      onGenerated(fallback);
+      setResult(fallback);
       console.error('[film-step5] generate failed:', e);
     }
   };
@@ -114,7 +120,7 @@ export default function Step5Narration({
         >📝 解说工作台</button>
         <button
           className={'film-step5__tab' + (topTab === 'storyboard' ? ' active' : '')}
-          onClick={() => { actions.task('分镜工作台在 M5 实现后启用', 100); setTopTab('storyboard'); }}
+          onClick={() => onGotoStoryboard()}
         >🎬 分镜工作台</button>
       </div>
 
@@ -268,9 +274,39 @@ export default function Step5Narration({
             </div>
           </div>
 
-          <button className="btn primary film-step5__start" onClick={submitGen} disabled={busy}>
-            {busy ? '生成中...' : '开始生成'}
+          <button className="btn primary film-step5__start" onClick={submitGen} disabled={busy || !!result}>
+            {busy ? '生成中...' : result ? '已生成 ✓' : '开始生成'}
           </button>
+
+          {/* 生成结果展示面板 */}
+          {result && !busy && (
+            <div className="film-step5__result">
+              <div className="film-step5__result-head">
+                <span className="film-step5__result-title">解说文案已生成 ✓</span>
+                <div className="film-step5__chips">
+                  <span className="chip">{countSections(result)} 段</span>
+                  <span className="chip">{result.replace(/\s/g, '').length} 字</span>
+                  <span className="chip">约 {estMin(result)} 分钟</span>
+                  <span className="chip">{styleName}</span>
+                  <span className="chip">{language === 'CN' ? '中文' : language === 'EN' ? 'English' : language === 'JA' ? '日本語' : language}</span>
+                </div>
+              </div>
+              {asrFailed && (
+                <div className="film-step5__warn">
+                  ⚠ ASR 转写未成功（视频无语音轨、未配置 ASR 服务或网络异常），以下文案为根据标题与所选风格<b>自由创作</b>，可能与视频实际内容不符。
+                  {asrReason && (
+                    <div className="film-step5__warn-reason">原因：{asrReason}</div>
+                  )}
+                  建议：到「设置」配置 XiaomiMimo ASR 密钥，或在上方补充「解说辅助」后再生成。
+                </div>
+              )}
+              <div className="film-step5__script">{result}</div>
+              <div className="film-step5__result-actions">
+                <button className="btn primary" onClick={() => onGenerated(result)}>进入分镜工作台 →</button>
+                <button className="btn ghost" onClick={() => { setResult(null); setAsrFailed(false); setAsrReason(''); }}>重新生成</button>
+              </div>
+            </div>
+          )}
         </>
       ) : (
         <div className="film-step5__placeholder">
@@ -311,4 +347,15 @@ function fmtSec(sec: number): string {
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
   return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function countSections(s: string): number {
+  const tagged = s.split('\n').filter((l) => /^\[/.test(l.trim())).length;
+  if (tagged > 0) return tagged;
+  return s.split('\n').filter((l) => l.trim()).length;
+}
+
+function estMin(s: string): number {
+  const chars = s.replace(/\s/g, '').length;
+  return Math.max(1, Math.round(chars / 4.5 / 60));
 }

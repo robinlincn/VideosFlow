@@ -290,7 +290,14 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
     }
     // M2.5：调真实 Rust 任务（film_script_gen）走 ASR→LLM→六段式
     task('生成解说文案中…', 10);
-    submitFilmScriptGen(proj.id, (m) => {
+    submitFilmScriptGen(proj.id, {
+      videoPath: (proj as any).videoPath || '',
+      title: (proj as any).title || (proj as any).t || '未命名视频',
+      style: (proj as any).categoryId || 'movie',
+      language: 'zh',
+      duration: 180,
+      hint: '',
+    }, (m) => {
       task(m.message || '生成中…', m.progress);
       if (m.status === 'done') {
         const script = (m.payload as any)?.script || '';
@@ -915,11 +922,13 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
   const hydrateProviders = (rows: ProviderRow[]) => set((s) => {
     const providers: Record<string, ProviderCfg> = {};
     for (const r of rows) {
+      const mode = (r.mode === 'local' ? 'local' : 'cloud') as 'cloud' | 'local';
       providers[r.kind] = {
         name: r.name, provider: r.provider, baseUrl: r.baseUrl,
         apiKey: '', model: r.model, enabled: r.enabled,
         hasKey: r.hasKey,
-        test: r.hasKey ? 'ok' : 'idle',
+        mode,
+        test: mode === 'local' ? 'local' : (r.hasKey ? 'ok' : 'idle'),
       };
     }
     return { ...s, settingsState: { ...s.settingsState, providers } };

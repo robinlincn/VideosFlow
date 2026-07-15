@@ -3,6 +3,8 @@
 // M2：film_category_* / film_project_* / film_timeline_save / film_timeline_load /
 //     film_import / film_smart_cut / film_export（后三者内部提交异步任务并经 Channel 推进度）。
 
+use base64::Engine;
+use reqwest::Client;
 use serde::Deserialize;
 use std::time::Duration;
 use tauri::ipc::Channel;
@@ -38,8 +40,9 @@ pub async fn provider_upsert(
     base_url: String,
     model: String,
     enabled: bool,
+    mode: String,
 ) -> Result<(), String> {
-    db::upsert(&state.pool, &kind, &name, &provider, &base_url, &model, enabled).await
+    db::upsert(&state.pool, &kind, &name, &provider, &base_url, &model, enabled, &mode).await
 }
 
 #[tauri::command]
@@ -69,8 +72,120 @@ pub async fn provider_key_get(
     cred::get_key(&state.pool, &kind).await
 }
 
-/// 连接测试：Rust 端直接用 reqwest 探测 Base URL 可达性 + 鉴权有效性，
-/// 不再依赖 Python sidecar（sidecar 仅在口播/创作模块运行时启用，设置页测试不应被其阻塞）。
+/// 返回本地模型目录（资源文件夹下的 models 子目录），用于放置 faster-whisper / Whisper 等本地大模型权重。
+/// 目录在首次调用时自动创建。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_models_dir(state: State<'_, AppState>) -> Result<String, String> {
+    let dir = &state.models_dir;
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建模型目录失败: {e}"))?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+/// 下载本地 ASR 模型（faster-whisper CTranslate2 权重）到项目内 models 目录。
+/// `model` 为尺寸（tiny/base/small/medium/large-v3），`source` 为下载源
+/// （hf-mirror=HuggingFace 国内镜像，huggingface=直连官方）。通过 Channel 实时回报进度。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn download_model(
+    state: State<'_, AppState>,
+    model: String,
+    source: String,
+    on_progress: Channel<serde_json::Value>,
+) -> Result<String, String> {
+    let size = model.trim();
+    let repo = format!("Systran/faster-whisper-{size}");
+    let base = if source == "huggingface" {
+        "https://huggingface.co"
+    } else {
+        "https://hf-mirror.com"
+    };
+    let local_dir = state.models_dir.join(size);
+    std::fs::create_dir_all(&local_dir).map_err(|e| e.to_string())?;
+
+    // 1) 列举模型文件树
+    let tree_url = format!("{base}/api/models/{repo}/tree/main");
+    on_progress.send(serde_json::json!({"phase": "listing", "repo": repo})).ok();
+    let resp = state
+        .client
+        .get(&tree_url)
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| format!("列举文件失败: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "列举文件失败 HTTP {}（源 {base} 可能不可达，请切换下载源）",
+            resp.status()
+        ));
+    }
+    let files: Vec<serde_json::Value> = resp.json().await.map_err(|e| e.to_string())?;
+    // 过滤掉 .gitattributes（无需下载）；其余（config.json/model.bin/tokenizer.json/vocabulary.txt/README 等）全部下载
+    let to_download: Vec<(String, u64)> = files
+        .iter()
+        .filter_map(|f| {
+            let path = f.get("path")?.as_str()?.to_string();
+            if path == ".gitattributes" {
+                return None;
+            }
+            let sz = f.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+            Some((path, sz))
+        })
+        .collect();
+    if to_download.is_empty() {
+        return Err("未从源获取到任何模型文件".into());
+    }
+    let total: u64 = to_download.iter().map(|(_, s)| *s).sum();
+    let mut done: u64 = 0;
+    for (path, _fsize) in to_download {
+        let file_url = format!("{base}/{repo}/resolve/main/{path}");
+        let out_path = local_dir.join(&path);
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let mut resp = state
+            .client
+            .get(&file_url)
+            .timeout(Duration::from_secs(1800))
+            .send()
+            .await
+            .map_err(|e| format!("下载 {path} 失败: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("下载 {path} 失败 HTTP {}", resp.status()));
+        }
+        use std::io::Write;
+        let mut f = std::fs::File::create(&out_path).map_err(|e| e.to_string())?;
+        while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+            f.write_all(&chunk).map_err(|e| e.to_string())?;
+            done += chunk.len() as u64;
+            on_progress
+                .send(serde_json::json!({
+                    "phase": "downloading",
+                    "file": path,
+                    "current": done,
+                    "total": total
+                }))
+                .ok();
+        }
+    }
+    on_progress
+        .send(serde_json::json!({"phase": "done", "dir": local_dir.display().to_string()}))
+        .ok();
+    Ok(local_dir.display().to_string())
+}
+
+/// 检查指定尺寸的本地模型是否已下载（models/{model} 下同时存在 model.bin 与 config.json）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn check_local_model(
+    state: State<'_, AppState>,
+    model: String,
+) -> Result<bool, String> {
+    let dir = state.models_dir.join(model.trim());
+    Ok(dir.join("model.bin").exists() && dir.join("config.json").exists())
+}
+
+/// 连接测试：Rust 端直接用 reqwest 探测。
+/// - ASR / TTS：直连真实端点做「功能级」验证（用静音样本 / 短文本真正请求一次），
+///   只有端点返回 2xx 且不是鉴权错误，才视为 Key 有效 —— 避免「仅连通性」假阳性。
+/// - 其它（LLM/Image/Video，OpenAI 兼容）：优先 /models 验证鉴权，否则退回基础连通性。
 /// `api_key` 为可选：传入时优先用「正在填写、尚未保存」的 Key 直接测，无需先点保存。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn provider_test(
@@ -79,17 +194,33 @@ pub async fn provider_test(
     api_key: Option<String>,
 ) -> Result<String, String> {
     let row = db::get_by_kind(&state.pool, &kind).await?;
+    // 本地推理模式无需联网测试
+    if row.mode == "local" {
+        return Ok("local".into());
+    }
     let stored = cred::get_key(&state.pool, &kind).await?;
     let key = api_key
         .filter(|k| !k.is_empty())
         .or_else(|| stored.filter(|k| !k.is_empty()));
     let base = row.base_url.trim().to_string();
+    // 本地模式（如 faster-whisper / Whisper）：无云端，无需连接测试，直接返回 'local'
+    if row.mode == "local" {
+        return Ok("local".into());
+    }
     if base.is_empty() {
         return Err("请先填写 Base URL 再测试连接".into());
     }
     let client = &state.client;
     let has_key = key.is_some();
-    // 优先尝试 OpenAI 兼容的 /models 端点（可同时验证鉴权有效性）
+
+    // 真实功能测试：ASR / TTS 直连真实端点，验证 Key 对该能力确实有效
+    match kind.as_str() {
+        "asr" => return test_asr(client, &base, &row.model, key.as_deref()).await,
+        "tts" => return test_tts(client, &base, &row.model, key.as_deref()).await,
+        _ => {}
+    }
+
+    // 通用 OpenAI 兼容（LLM/Image/Video）：优先 /models 验证鉴权，否则退回连通性
     let models_url = format!("{}/models", base.trim_end_matches('/'));
     let mut req = client.get(&models_url).timeout(Duration::from_secs(8));
     if let Some(k) = &key {
@@ -119,6 +250,106 @@ pub async fn provider_test(
         Ok(_) => Ok("ok".into()),
         Err(e) => Err(format!("无法连接到 {base}：{e}")),
     }
+}
+
+/// 生成一个极小的静音 WAV（PCM16 单声道 8kHz，0.3s），用于 ASR 探测时作为有效音频载荷。
+fn make_probe_wav() -> Vec<u8> {
+    let sample_rate: u32 = 8000;
+    let num_samples: u32 = sample_rate * 3 / 10; // 0.3s
+    let data_len = num_samples * 2;
+    let mut wav: Vec<u8> = Vec::with_capacity(44 + data_len as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // 单声道
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
+    wav.extend_from_slice(&2u16.to_le_bytes()); // block align
+    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    for _ in 0..num_samples {
+        wav.extend_from_slice(&0i16.to_le_bytes());
+    }
+    wav
+}
+
+/// ASR 功能测试：用静音 WAV 真实请求一次 /chat/completions。
+/// 通过标准：HTTP 2xx 且响应体非「鉴权错误」。静音转写为空属正常，不算失败。
+async fn test_asr(client: &Client, base: &str, model: &str, key: Option<&str>) -> Result<String, String> {
+    let key = key.ok_or("缺少 API Key，请先填写 Key 再测试 ASR")?;
+    let wav = make_probe_wav();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&wav);
+    let base_url = base.trim_end_matches('/');
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "input_audio",
+                "input_audio": { "data": format!("data:audio/wav;base64,{b64}") }
+            }]
+        }],
+        "asr_options": { "language": "zh" },
+        "stream": false
+    });
+    let resp = client
+        .post(format!("{base_url}/chat/completions"))
+        .bearer_auth(key)
+        .json(&body)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("ASR 请求失败：{e}"))?;
+    let code = resp.status().as_u16();
+    if !resp.status().is_success() {
+        if code == 401 || code == 403 {
+            return Err("ASR API Key 无效或未授权（HTTP 401/403），请检查密钥".into());
+        }
+        let txt = resp.text().await.unwrap_or_default();
+        return Err(format!("ASR 端点返回错误（HTTP {code}）：{txt}"));
+    }
+    // 2xx：鉴权通过。若响应体携带 error 字段则提示（部分网关以 200 包裹错误）。
+    if let Ok(v) = resp.json::<serde_json::Value>().await {
+        if let Some(err) = v.get("error") {
+            return Err(format!("ASR 端点返回错误：{err}"));
+        }
+    }
+    Ok("ok".into())
+}
+
+/// TTS 功能测试：用一句短文本真实请求一次 /audio/speech，校验返回音频字节。
+async fn test_tts(client: &Client, base: &str, model: &str, key: Option<&str>) -> Result<String, String> {
+    let key = key.ok_or("缺少 API Key，请先填写 Key 再测试 TTS")?;
+    let body = serde_json::json!({
+        "model": model,
+        "input": "你好。",
+        "voice": "default"
+    });
+    let resp = client
+        .post(format!("{}/audio/speech", base.trim_end_matches('/')))
+        .bearer_auth(key)
+        .json(&body)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("TTS 请求失败：{e}"))?;
+    let code = resp.status().as_u16();
+    if !resp.status().is_success() {
+        if code == 401 || code == 403 {
+            return Err("TTS API Key 无效或未授权（HTTP 401/403），请检查密钥".into());
+        }
+        let txt = resp.text().await.unwrap_or_default();
+        return Err(format!("TTS 端点返回错误（HTTP {code}）：{txt}"));
+    }
+    let bytes = resp.bytes().await.map_err(|e| format!("TTS 响应读取失败：{e}"))?;
+    if bytes.is_empty() {
+        return Err("TTS 返回空音频，请确认模型/密钥是否支持 TTS".into());
+    }
+    Ok("ok".into())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -700,6 +931,12 @@ pub async fn submit_image_gen(
 pub async fn submit_film_script_gen(
     state: State<'_, AppState>,
     project_id: String,
+    video_path: String,
+    title: String,
+    style: String,
+    language: String,
+    duration: u32,
+    hint: String,
     on_progress: Channel<ProgressMsg>,
 ) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
@@ -708,9 +945,23 @@ pub async fn submit_film_script_gen(
         id: id.clone(),
         kind: "film_script_gen".into(),
         project_id: Some(project_id.clone()),
-        payload: serde_json::json!({ "projectId": project_id }),
+        payload: serde_json::json!({
+            "projectId": project_id,
+            "videoPath": video_path,
+            "title": title,
+            "style": style,
+            "language": language,
+            "duration": duration,
+            "hint": hint,
+        }),
         channel: on_progress,
     };
     state.task_tx.send(job).await.map_err(|e| e.to_string())?;
     Ok(id)
+}
+
+// 返回本地视频预览文件服务器的基址（127.0.0.1:随机端口），供 WebView <video> 加载本地文件
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_video_server_url(state: State<'_, AppState>) -> String {
+    format!("http://127.0.0.1:{}", state.video_server_port)
 }

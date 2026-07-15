@@ -10,6 +10,7 @@ import type {
   TimelineClip,
   FlowerTemplate,
   FilmExportOptions,
+  FilmScriptGenOptions,
   SpokenVideo,
   SpokenEdit,
   SpokenAsset,
@@ -32,6 +33,7 @@ export type {
   TimelineClip,
   FlowerTemplate,
   FilmExportOptions,
+  FilmScriptGenOptions,
   SpokenVideo,
   SpokenEdit,
   SpokenAsset,
@@ -57,6 +59,7 @@ export async function saveProvider(row: {
   baseUrl: string;
   model: string;
   enabled: boolean;
+  mode?: string;
 }): Promise<void> {
   await invoke('provider_upsert', {
     kind: row.kind,
@@ -65,7 +68,37 @@ export async function saveProvider(row: {
     baseUrl: row.baseUrl,
     model: row.model,
     enabled: row.enabled,
+    mode: row.mode ?? 'cloud',
   });
+}
+
+/** 返回本地模型目录（项目内 models 目录），用于放置 faster-whisper / Whisper 等本地大模型权重。 */
+export async function getModelsDir(): Promise<string> {
+  return invoke<string>('get_models_dir');
+}
+
+/** 本地 ASR 模型尺寸清单（faster-whisper CTranslate2 权重在 HuggingFace 上的 repo 尺寸）。 */
+export const LOCAL_ASR_MODELS = [
+  { id: 'tiny', label: 'tiny（约 75MB · 最快·精度低）' },
+  { id: 'base', label: 'base（约 140MB · 推荐起步）' },
+  { id: 'small', label: 'small（约 460MB · 均衡）' },
+  { id: 'medium', label: 'medium（约 1.5GB · 高精度）' },
+  { id: 'large-v3', label: 'large-v3（约 3GB · 最高精度）' },
+];
+
+/** 下载本地 ASR 模型到项目内 models 目录，经 Tauri Channel 回报进度。 */
+export async function downloadModel(
+  model: string,
+  source: string,
+  onProgress: (p: { phase: string; file?: string; current?: number; total?: number; dir?: string }) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  return invoke<string>('download_model', { model, source, onProgress: ch });
+}
+
+/** 检查指定尺寸的本地模型是否已下载（models/{model} 下含 model.bin + config.json）。 */
+export async function checkLocalModel(model: string): Promise<boolean> {
+  return invoke<boolean>('check_local_model', { model });
 }
 
 /** 写入某网关 API Key（存系统凭据库，不落前端/SQLite 明文）。 */
@@ -459,8 +492,18 @@ export async function submitImageGen(
 
 export async function submitFilmScriptGen(
   projectId: string,
+  opts: FilmScriptGenOptions,
   onProgress: (m: ProgressMsg) => void,
 ): Promise<string> {
   const ch = createChannel(onProgress);
-  return invoke<string>('submit_film_script_gen', { projectId, onProgress: ch });
+  return invoke<string>('submit_film_script_gen', {
+    projectId,
+    videoPath: opts.videoPath,
+    title: opts.title,
+    style: opts.style,
+    language: opts.language,
+    duration: opts.duration,
+    hint: opts.hint,
+    onProgress: ch,
+  });
 }

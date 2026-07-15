@@ -1,18 +1,21 @@
-// 步骤 6：视频配音剪辑 = 分镜工作台（13 列表格 + 顶部 13 工具 + 左侧视频预览 + 底部 4 选项 + 3 导出按钮）
-// v2.0 重构：替代 v1.0 的 StoryboardWorkbench（6 卡片 + 4 面板），更接近剪映/PR 的表格化交互
+// 步骤 6：视频配音剪辑 = 分镜工作台（剪辑脚本表 + 工具栏 + 视频预览 + 导出）
+// v2.0 重构：替代 v1.0 的 StoryboardWorkbench。分镜可编辑/删除/排序并持久化回草稿。
 
-import { useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useApp } from '../../state/AppContext';
+import { submitFilmExport } from '../../ipc/providers';
+import type { ProgressMsg } from '../../ipc/types';
 
 interface Props {
   script: string;
-  videoPath: string;
   videoName: string;
+  projectId: string;
   totalDuration: number;
   rangeStart: number;
   rangeEnd: number;
   onBack: () => void;
   onSwitchToNarration: () => void;
+  onScriptChange?: (script: string) => void;
 }
 
 interface Segment {
@@ -66,7 +69,11 @@ function fmt(sec: number): string {
   const s = Math.floor(sec % 60);
   return `${m}:${String(s).padStart(2, '0')}.${String(Math.floor((sec % 1) * 100)).padStart(2, '0')}`;
 }
-
+function fmtShort(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
 function fmtDur(sec: number): string {
   if (sec >= 60) {
     const m = Math.floor(sec / 60);
@@ -74,6 +81,9 @@ function fmtDur(sec: number): string {
     return `${m}分${s.toFixed(1)}秒`;
   }
   return `${sec.toFixed(1)}秒`;
+}
+function segsToScript(segs: Segment[]): string {
+  return segs.map((s) => `[${s.section}] ${fmtShort(s.start)}-${fmtShort(s.end)} ${s.text}`).join('\n');
 }
 
 const TOOLBAR = [
@@ -93,15 +103,26 @@ const TOOLBAR = [
 ];
 
 export default function Step6DubAndCut({
-  script, videoPath, videoName, totalDuration, rangeStart, rangeEnd, onBack, onSwitchToNarration,
+  script, videoName, projectId, totalDuration, rangeStart, rangeEnd, onBack, onSwitchToNarration, onScriptChange,
 }: Props) {
   const { actions } = useApp();
-  const segments = useMemo(() => parseScript(script, totalDuration, rangeStart), [script, totalDuration, rangeStart]);
+  const [segs, setSegs] = useState<Segment[]>(() => parseScript(script, totalDuration, rangeStart));
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
   const [editingText, setEditingText] = useState('');
   const [subtitleStyle, setSubtitleStyle] = useState('经典-白字黑边');
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportMsg, setExportMsg] = useState('');
 
-  const dubCount = 0; // M5 接入配音后统计
+  // 从解说工作台带入新脚本时重新解析
+  useEffect(() => {
+    setSegs(parseScript(script, totalDuration, rangeStart));
+    setEditingIdx(null);
+  }, [script, totalDuration, rangeStart]);
+
+  const persist = (next: Segment[]) => {
+    setSegs(next);
+    onScriptChange?.(segsToScript(next));
+  };
 
   const handleEdit = (i: number, text: string) => {
     setEditingIdx(i);
@@ -109,21 +130,24 @@ export default function Step6DubAndCut({
   };
   const commitEdit = () => {
     if (editingIdx === null) return;
-    segments[editingIdx].text = editingText;
+    const next = segs.map((s, idx) => (idx === editingIdx ? { ...s, text: editingText } : s));
+    persist(next);
     setEditingIdx(null);
   };
   const removeSegment = (i: number) => {
-    segments.splice(i, 1);
-    segments.forEach((s, idx) => { s.index = idx; });
+    const next = segs.filter((_, idx) => idx !== i).map((s, idx) => ({ ...s, index: idx }));
+    persist(next);
   };
   const moveSegment = (i: number, dir: -1 | 1) => {
     const j = i + dir;
-    if (j < 0 || j >= segments.length) return;
-    [segments[i], segments[j]] = [segments[j], segments[i]];
-    segments.forEach((s, idx) => { s.index = idx; });
+    if (j < 0 || j >= segs.length) return;
+    const next = [...segs];
+    [next[i], next[j]] = [next[j], next[i]];
+    next.forEach((s, idx) => { s.index = idx; });
+    persist(next);
   };
   const generateSrt = () => {
-    const srt = segments.map((s, i) => `${i + 1}\n${fmt(s.start)} --> ${fmt(s.end)}\n${s.text}\n`).join('\n');
+    const srt = segs.map((s, i) => `${i + 1}\n${fmt(s.start)} --> ${fmt(s.end)}\n${s.text}\n`).join('\n');
     const blob = new Blob([srt], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -131,6 +155,60 @@ export default function Step6DubAndCut({
     a.click();
     URL.revokeObjectURL(url);
     actions.task('SRT 字幕已下载', 100);
+  };
+  const exportJianying = async () => {
+    setExportBusy(true);
+    setExportMsg('准备导出');
+    try {
+      await submitFilmExport(projectId || 'local', {
+        hw: false,
+        resolution: '1080p',
+        burnSub: true,
+        mixVoice: false,
+        voiceMix: 1,
+        script: segsToScript(segs),
+      }, (m: ProgressMsg) => {
+        setExportMsg(m.message || '');
+        if (m.status === 'done') {
+          setExportBusy(false);
+          const out = (m.payload as any)?.outPath || '';
+          actions.task('剪映草稿已导出：' + out, 100);
+          setExportMsg('导出完成：' + out);
+        } else if (m.status === 'failed') {
+          setExportBusy(false);
+          actions.task('导出失败：' + (m.message || ''), 100);
+          setExportMsg('导出失败');
+        }
+      });
+    } catch (e) {
+      setExportBusy(false);
+      actions.task('导出失败：' + String(e), 100);
+      setExportMsg('导出失败');
+    }
+  };
+  const onTool = (id: string) => {
+    switch (id) {
+      case 'export_srt':
+        generateSrt();
+        break;
+      case 'regen':
+        onSwitchToNarration();
+        break;
+      case 'copy_sub': {
+        const txt = segs.map((s) => s.text).join('\n');
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(txt).then(
+            () => actions.task('字幕已复制到剪贴板', 100),
+            () => actions.task('复制失败', 100),
+          );
+        } else {
+          actions.task('当前环境不支持剪贴板', 100);
+        }
+        break;
+      }
+      default:
+        actions.task(`${TOOLBAR.find((t) => t.id === id)?.label || id}（M5 实现）`, 100);
+    }
   };
 
   return (
@@ -141,13 +219,13 @@ export default function Step6DubAndCut({
         <button className="film-step5__tab active">🎬 分镜工作台</button>
       </div>
 
-      {/* 13 工具栏 */}
+      {/* 工具栏 */}
       <div className="film-step6__toolbar">
         {TOOLBAR.map((t) => (
           <button
             key={t.id}
             className={'film-step6__tool' + (t.primary ? ' film-step6__tool--primary' : '')}
-            onClick={() => actions.task(`${t.label}（M5 实现）`, 100)}
+            onClick={() => onTool(t.id)}
             title={t.label}
           >
             <span className="film-step6__tool-icon">{t.icon}</span>
@@ -156,10 +234,10 @@ export default function Step6DubAndCut({
         ))}
       </div>
 
-      {/* 进度提示 */}
+      {/* 进度 / 导出提示 */}
       <div className="film-step6__progress">
         <span className="muted">
-          💡 解说生成完成！下一步 ①点击『批量配音』→ ②点击『导出剪映草稿』即可完成 ｜ 此项目已保存，关闭后下次从首页『首稿』进入可继续操作
+          💡 解说生成完成！可单击解说词编辑、调整顺序或删除；点击『导出 SRT』下载字幕，或『导出剪映草稿』生成工程文件。
         </span>
       </div>
 
@@ -172,10 +250,10 @@ export default function Step6DubAndCut({
               <div className="film-step6__timeline-handle" />
             </div>
             <div className="film-step6__video-meta">
-              <div>当前分镜：<span className="muted">-</span></div>
-              <div>时间轴：<span className="muted">-</span></div>
-              <div>预览语音：<span className="muted">-</span></div>
-              <div>状态：<span className="muted">就位 语言 -</span></div>
+              <div>视频文件：<span className="muted">{videoName || '-'}</span></div>
+              <div>分镜数：<span className="muted">{segs.length}</span></div>
+              <div>成片约：<span className="muted">{fmtDur(rangeEnd - rangeStart)}</span></div>
+              <div>状态：<span className="muted">就位</span></div>
             </div>
           </div>
         </div>
@@ -184,7 +262,7 @@ export default function Step6DubAndCut({
         <div className="film-step6__right">
           <div className="film-step6__script-header">
             <span>剪辑脚本</span>
-            <span className="muted">共 <b style={{ color: 'var(--accent)' }}>{segments.length}</b> 条 ✓ {segments.length} | ⚠ 0 | 原片 0 | 成片约 {fmtDur(rangeEnd - rangeStart)}</span>
+            <span className="muted">共 <b style={{ color: 'var(--accent)' }}>{segs.length}</b> 条 ✓ {segs.length} | ⚠ 0 | 原片 0 | 成片约 {fmtDur(rangeEnd - rangeStart)}</span>
           </div>
           <div className="film-step6__table-wrap">
             <table className="film-step6__table">
@@ -202,10 +280,10 @@ export default function Step6DubAndCut({
                 </tr>
               </thead>
               <tbody>
-                {segments.length === 0 && (
+                {segs.length === 0 && (
                   <tr><td colSpan={9} className="muted" style={{ textAlign: 'center', padding: 20 }}>暂无分镜数据。请先在解说工作台生成解说。</td></tr>
                 )}
-                {segments.slice(0, 15).map((s) => (
+                {segs.slice(0, 15).map((s) => (
                   <tr key={s.index}>
                     <td>{s.index + 1}</td>
                     <td className="film-step6__time">{fmt(s.start)}</td>
@@ -252,7 +330,7 @@ export default function Step6DubAndCut({
           <span className="muted">比例：</span>
           <select className="form-select" style={{ maxWidth: 120 }}><option>原比例</option><option>16:9</option><option>9:16</option></select>
           <span className="muted" style={{ marginLeft: 12 }}>字幕：</span>
-          <select className="form-select" style={{ maxWidth: 140 }} value={subtitleStyle} onChange={(e) => actions.task(`字幕样式：${e.target.value}`, 100)}>
+          <select className="form-select" style={{ maxWidth: 140 }} value={subtitleStyle} onChange={(e) => setSubtitleStyle(e.target.value)}>
             <option>经典-白字黑边</option>
             <option>简约-无边框</option>
             <option>阴影-黑字阴影</option>
@@ -262,7 +340,9 @@ export default function Step6DubAndCut({
           <label className="film-step6__check"><input type="checkbox" onChange={() => actions.task('音频强制对齐（M5）', 100)} /> 音频强制对齐</label>
         </div>
         <div className="film-step6__bottom-exports">
-          <button className="btn primary film-step6__export-btn" onClick={() => actions.exportFilm()}>📤 导出剪映草稿</button>
+          <button className="btn primary film-step6__export-btn" onClick={exportJianying} disabled={exportBusy}>
+            {exportBusy ? (exportMsg || '导出中...') : '📤 导出剪映草稿'}
+          </button>
           <button className="btn sm" onClick={() => actions.task('导出 Premiere（M5 远期）', 100)}>📤 导出 Premiere</button>
           <button className="btn sm" onClick={() => actions.task('导出国际剪映（M5 远期）', 100)}>📤 导出国际剪映</button>
           <button className="btn sm ghost" onClick={generateSrt}>💾 导出 SRT</button>

@@ -28,6 +28,27 @@ export function createChannel(onMessage: (msg: any) => void): any {
   return { __mockChannel: true, _on: onMessage };
 }
 
+// 本地视频预览服务器（桌面版由 Rust 端 fileserver 提供，浏览器无需）
+let VIDEO_SERVER_BASE = '';
+let videoServerReady: Promise<void> | null = null;
+export function initVideoServer(): Promise<void> {
+  if (videoServerReady) return videoServerReady;
+  videoServerReady = (async () => {
+    if (hasTauri) {
+      try {
+        const base = await invoke<string>('get_video_server_url');
+        VIDEO_SERVER_BASE = base || '';
+      } catch {
+        VIDEO_SERVER_BASE = '';
+      }
+    }
+  })();
+  return videoServerReady;
+}
+export function getVideoServerBase(): string {
+  return VIDEO_SERVER_BASE;
+}
+
 // ---------------- 浏览器回退实现 ----------------
 const LS_PROVIDERS = 'videosflow.providers.mock';
 const LS_KEYS = 'videosflow.keys.mock';
@@ -52,6 +73,7 @@ interface MockProvider {
   model: string;
   enabled: boolean;
   hasKey: boolean;
+  mode?: string;
 }
 
 function readJSON<T>(key: string, fallback: T): T {
@@ -79,11 +101,11 @@ function seedProvidersIfEmpty(): MockProvider[] {
   let list = readJSON<MockProvider[] | null>(LS_PROVIDERS, null);
   if (list && list.length) return list;
   list = [
-    { id: 'p-llm', kind: 'llm', name: '文字大模型', provider: 'agnes', baseUrl: 'https://apihub.agnes-ai.com/v1', model: 'agnes-2.0-flash', enabled: true, hasKey: false },
-    { id: 'p-img', kind: 'img', name: '图片大模型', provider: 'agnes', baseUrl: 'https://apihub.agnes-ai.com/v1', model: 'agnes-image-2.1-flash', enabled: true, hasKey: false },
-    { id: 'p-video', kind: 'video', name: '视频大模型', provider: 'agnes', baseUrl: 'https://apihub.agnes-ai.com/v1', model: 'agnes-video-v2.0', enabled: true, hasKey: false },
-    { id: 'p-asr', kind: 'asr', name: '语音识别', provider: 'agnes', baseUrl: 'https://apihub.agnes-ai.com/v1', model: 'agnes-asr-1.0', enabled: true, hasKey: false },
-    { id: 'p-tts', kind: 'tts', name: '语音合成', provider: 'mimo', baseUrl: 'https://api.xiaomimimo.com/v1', model: 'mimo-v2.5-tts', enabled: true, hasKey: false },
+    { id: 'p-llm', kind: 'llm', name: '文字大模型', provider: 'agnes', baseUrl: 'https://apihub.agnes-ai.com/v1', model: 'agnes-2.0-flash', enabled: true, hasKey: false, mode: 'cloud' },
+    { id: 'p-img', kind: 'img', name: '图片大模型', provider: 'agnes', baseUrl: 'https://apihub.agnes-ai.com/v1', model: 'agnes-image-2.1-flash', enabled: true, hasKey: false, mode: 'cloud' },
+    { id: 'p-video', kind: 'video', name: '视频大模型', provider: 'agnes', baseUrl: 'https://apihub.agnes-ai.com/v1', model: 'agnes-video-v2.0', enabled: true, hasKey: false, mode: 'cloud' },
+    { id: 'p-asr', kind: 'asr', name: '语音识别', provider: 'agnes', baseUrl: 'https://apihub.agnes-ai.com/v1', model: 'agnes-asr-1.0', enabled: true, hasKey: false, mode: 'cloud' },
+    { id: 'p-tts', kind: 'tts', name: '语音合成', provider: 'mimo', baseUrl: 'https://api.xiaomimimo.com/v1', model: 'mimo-v2.5-tts', enabled: true, hasKey: false, mode: 'cloud' },
   ];
   writeJSON(LS_PROVIDERS, list);
   return list;
@@ -213,6 +235,7 @@ async function mockInvoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
         model: a.model || '',
         enabled: a.enabled !== false,
         hasKey: idx >= 0 ? list[idx].hasKey : false,
+        mode: a.mode || 'cloud',
       };
       if (idx >= 0) list[idx] = row;
       else list.push(row);
@@ -240,11 +263,39 @@ async function mockInvoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
       await delay(700);
       const list = seedProvidersIfEmpty();
       const p = list.find((x) => x.kind === a.kind);
+      if (p && p.mode === 'local') return 'local' as any;
       if (p) {
         p.hasKey = true;
         writeJSON(LS_PROVIDERS, list);
       }
       return 'ok' as any;
+    }
+    case 'get_models_dir': {
+      // 浏览器预览模式下无真实数据目录，返回代表性占位路径
+      return 'videosflow-data/models' as any;
+    }
+    case 'download_model': {
+      // 浏览器预览：模拟下载进度（不真正下载），结束时回传 done
+      const ch = a.on_progress;
+      if (ch && ch.__mockChannel && ch._on) {
+        const total = 140 * 1024 * 1024;
+        let cur = 0;
+        const timer = setInterval(() => {
+          cur += total / 20;
+          if (cur >= total) {
+            clearInterval(timer);
+            ch._on({ phase: 'downloading', file: 'model.bin', current: total, total });
+            ch._on({ phase: 'done', dir: 'videosflow-data/models/' + a.model });
+          } else {
+            ch._on({ phase: 'downloading', file: 'model.bin', current: cur, total });
+          }
+        }, 120);
+      }
+      return ('videosflow-data/models/' + a.model) as any;
+    }
+    case 'check_local_model': {
+      // 浏览器预览：默认未下载
+      return false as any;
     }
     case 'task_submit': {
       const taskId = 'mock-' + Math.random().toString(36).slice(2);
@@ -882,25 +933,44 @@ async function mockInvoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
       const taskId = 'mock-' + Math.random().toString(36).slice(2);
       const ch = a.on_progress;
       const projectId = a.projectId;
+      const opts = {
+        videoPath: a.videoPath || '',
+        title: a.title || '未命名视频',
+        style: a.style || 'movie',
+        language: a.language || 'zh',
+        duration: typeof a.duration === 'number' ? a.duration : 180,
+        hint: a.hint || '',
+      };
+      const fmt = (sec: number) => {
+        const m = Math.floor(sec / 60);
+        const s = Math.floor(sec % 60);
+        return `${m}:${String(s).padStart(2, '0')}`;
+      };
+      const sections = ['开端', '铺垫', '冲突', '高潮', '反转', '结局'];
+      const total = opts.duration;
       const steps = [15, 30, 55, 85, 100];
       steps.forEach((p, i) => setTimeout(() => {
         if (i === steps.length - 1) {
-          // 模拟 6 段式 LLM 输出 → 落 film_projects.script
-          const mockScript = [
-            '[开端] 00:00-00:30 当城市被第一缕阳光唤醒，主人公缓缓走入我们的视野，一个平凡的清晨却暗藏波澜。',
-            '[铺垫] 00:30-01:30 镜头切换到办公室，电话铃声打破宁静，一通改变命运的电话即将响起。',
-            '[冲突] 01:30-02:45 突然闯入的不速之客打破了生活的平衡，气氛瞬间紧张到极点。',
-            '[高潮] 02:45-04:00 追逐、躲藏、反击，每一个画面都扣人心弦，看得人屏住呼吸。',
-            '[反转] 04:00-05:00 真相浮出水面，原来所有线索都指向一个意想不到的答案。',
-            '[结局] 05:00-05:45 故事在一声叹息中落幕，生活的真相远比想象中复杂。',
-          ].join('\n');
+          const mockScript = sections.map((s, idx) => {
+            const start = Math.floor((total * idx) / 6);
+            const end = Math.floor((total * (idx + 1)) / 6);
+            let body: string;
+            if (idx === 0) {
+              body = `【${opts.style}】${opts.title} 的故事，从一段看似平静的日常拉开帷幕，镜头缓缓推近，悬念已然埋下。`;
+            } else if (idx === sections.length - 1) {
+              body = `最终一切归于平静。${opts.hint ? opts.hint : '感谢观看，更多精彩内容下期继续。'}`;
+            } else {
+              body = `【${opts.style}】第 ${idx + 1} 段「${s}」：剧情在此加速推进，人物的每一个抉择都牵动命运走向，情绪层层堆叠。`;
+            }
+            return `[${s}] ${fmt(start)}-${fmt(end)} ${body}`;
+          }).join('\n');
           const films = readJSON<any[]>(LS_FILM_PROJECTS, []);
-          const film = films.find(f => f.id === projectId);
+          const film = films.find((f) => f.id === projectId);
           if (film) {
             film.script = mockScript;
             writeJSON(LS_FILM_PROJECTS, films);
           }
-          ch && ch._on && ch._on({ taskId, progress: 100, status: 'done', message: '解说文案生成完成（mock）', payload: { script: mockScript } });
+          ch && ch._on && ch._on({ taskId, progress: 100, status: 'done', message: '解说文案生成完成（mock）', payload: { script: mockScript, asrFailed: false, asrReason: '' } });
         } else {
           ch && ch._on && ch._on({ taskId, progress: p, status: 'running', message: ['抽取音轨', 'XiaomiMimo ASR 转写', 'Agnes 六段式生成', '写入影片库'][i] });
         }
