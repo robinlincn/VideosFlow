@@ -424,4 +424,35 @@ npm run tauri:dev
 
 ---
 
-_由 大幂幂 规划整理 · 2026-07-10（三大模块优化重组版 · 同日落地 Tauri2 + React + TS 工程骨架，UI 经两轮迭代至 Editorial Design System v3.0 编辑式设计）；2026-07-12 补充 M0–M2 实现进展与架构更正（移除 Python sidecar、AI 调用改为 Rust reqwest 直连云端 API、凭据库回读解耦）。_
+## 十三、影片视频分析 + 解说工作台重构进展（2026-07-15）
+
+本日工作围绕「影片解说工作台」做真实化与体验收敛，覆盖 4 个层面：
+
+### 1. 多模态大模型本地化打通（Ollama / https 修复）
+- **现象**：用户已在设置中配置 Ollama 本地多模态大模型并测试成功，但「影片视频分析」仍报 `Agnes 视觉调用失败`（`https://localhost:11434/...`）。
+- **根因**：DB 中 `llm` 行 `base_url` 误存为 `https`，而本地 Ollama 仅监听 `http`；外加代码对 `localhost` 未强制降为 http。
+- **修复**：新增 `fix_local_scheme()`（`src-tauri/src/tasks.rs`），对 `localhost`/`127.0.0.1` 的 URL 强制改 `http`；DB 中 `llm` 行 `base_url` 改回 `http://localhost:11434/v1`（模型 `gemma4:12b`）；修正设置页误导标签。重跑「开始生成」即可走通 Ollama 多模态分析。
+
+### 2. 影片视频分析触发时机重构（开始生成双阶段）
+- **旧逻辑**：「确认视频范围」后自动弹出十步分析弹窗 → 分析完进解说工作台。
+- **新逻辑**：分析**不再**在「确认范围」时跑，而是内嵌进解说工作台 Step5 的「开始生成」按钮，形成两阶段流水线：
+  - **阶段一（十步分析）**：调用多模态大模型分析影片，弹 `VideoAnalysisModal` 显示十步进度并产出分析报告。
+  - **阶段二（生成解说文案）**：把「阶段一的分析报告」+「解说工作台所选全部参数」一起注入提示词，生成六段式解说文案，传分镜工作台。
+- **全链路透传**：后端 `NarrationConfig` 增 `analysis` / `scene_nodes` 字段；`commands.rs` / `types.ts` / `providers.ts` 加 `analysis` 参数；`Film.tsx` 移除确认范围自动分析逻辑；`VideoAnalysisModal.tsx`（新增组件）复用展示十步进度；分析失败降级为 `resolve('')` 仍按参数 + ASR 生成并提示偏差。
+
+### 3. 解说文案与画面时间节点对齐
+- **旧问题**：解说文案时间轴按「视频时长均匀分布」，未跟真实画面切换点对齐。
+- **修复**：分析阶段用 ffmpeg 真实检测场景切换点，语义块时间改为片段内相对时间（0 基），并在报告内嵌机器可解析标记 `<!--SCENE_NODES:0.00-12.30,...-->`；新增 `extract_scene_nodes()`（优先读标记、回退逐行扫描 `m:ss` 令牌）与 `format_scene_nodes()`；提示词把「均匀分布」改为「严格按画面节点切分字幕，start/end 采用给定节点时间，禁止跨越画面切换点」。无切换点时回退按节奏（5~8 秒/条）切分，不阻断流程。
+
+### 4. 解说结果区结构化展示
+- **旧问题**：结果区把解说文案渲染成一坨无格式纯文本（无换行、无时间标记、无分段）。
+- **修复**：前端 `Step5Narration.tsx` 新增 `parseScriptSegments()` 解析器（正则匹配 `[段落] start-end dialogue`）；结果区改为**分段卡片列表**，每张卡片含「段落标签 + 时间节点 badge + 解说词正文」，`global.css` 新增 `.film-step5__seg*` 卡片样式（hover 高亮）。`split_script_to_sections` 降级路径输出也统一带 `[section] start-end` 格式，所有路径均带时间标记。
+- **繁→简兜底**：新增 `python-sidecar/to_simplified.py`（opencc t2s，未装则原样返回）对 LLM/ASR 最终文案兜底，统一简体中文。
+
+### 验证
+- `cargo check` / `tsc --noEmit` / `npm run build` 全绿；`cargo test --lib tasks` **5 passed**（含场景节点提取/对齐/回退解析）。
+- `film_projects` 表新增 `analysis` 列并兼容旧库（`ALTER TABLE ... ADD COLUMN` 幂等补列）；`lib.rs` 注册 `submit_film_video_analysis` / `get_film_analysis` 命令。
+
+---
+
+_由 大幂幂 规划整理 · 2026-07-10（三大模块优化重组版 · 同日落地 Tauri2 + React + TS 工程骨架，UI 经两轮迭代至 Editorial Design System v3.0 编辑式设计）；2026-07-12 补充 M0–M2 实现进展与架构更正（移除 Python sidecar、AI 调用改为 Rust reqwest 直连云端 API、凭据库回读解耦）；2026-07-15 补充影片视频分析本地化（Ollama/https 修复）、触发时机重构为「开始生成」双阶段、解说文案与画面时间节点对齐、结果区结构化分段卡片展示。_

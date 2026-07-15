@@ -70,7 +70,9 @@ export default function Film() {
 
   const stage = STAGE_OF_STEP[step];
 
-  const goStart = () => { setStep(1); setDraft(EMPTY_DRAFT); setTab('narration'); };
+  const goStart = () => {
+    setStep(1); setDraft(EMPTY_DRAFT); setTab('narration');
+  };
   const goStep2 = () => setStep(2);
   const goStep3 = (styleId: string, styleName: string) => {
     setDraft((d) => ({ ...d, styleId, styleName }));
@@ -97,6 +99,7 @@ export default function Film() {
     setShowRangeModal(false);
     setStep(5);
   };
+
   const goStep6 = (script: string) => {
     setDraft((d) => ({ ...d, script }));
     setTab('storyboard');

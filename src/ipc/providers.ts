@@ -501,9 +501,56 @@ export async function submitFilmScriptGen(
     videoPath: opts.videoPath,
     title: opts.title,
     style: opts.style,
+    styleName: opts.styleName ?? '',
     language: opts.language,
     duration: opts.duration,
     hint: opts.hint,
+    mode: opts.mode ?? 'ai',
+    view: opts.view ?? 'third',
+    model: opts.model ?? 'default',
+    analysisMode: opts.analysisMode ?? 0,
+    voiceId: opts.voiceId ?? '',
+    subtitleStyle: opts.subtitleStyle ?? '',
+    analysis: opts.analysis ?? '',
     onProgress: ch,
   });
+}
+
+export interface FilmVideoAnalysisOptions {
+  videoPath: string;
+  title: string;
+  styleName?: string;
+  start: number;
+  end: number;
+}
+
+/// M2.6：提交影片视频分析（多模态大模型）。确认视频范围后触发，进度经 Channel 上报十步。
+export async function submitFilmVideoAnalysis(
+  projectId: string,
+  opts: FilmVideoAnalysisOptions,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  return invoke<string>('submit_film_video_analysis', {
+    projectId,
+    videoPath: opts.videoPath,
+    title: opts.title,
+    styleName: opts.styleName ?? '',
+    start: opts.start,
+    end: opts.end,
+    onProgress: ch,
+  });
+}
+
+/// M2.6：读取影片视频分析总结报告（落库结果），供解说工作台重新进入时回填。
+export async function getFilmAnalysis(projectId: string): Promise<string | null> {
+  try {
+    const r = await invoke<{ Ok: string | null } | string | null>('get_film_analysis', { projectId });
+    if (r == null) return null;
+    if (typeof r === 'string') return r;
+    if (typeof r === 'object' && r && 'Ok' in r) return r.Ok;
+    return null;
+  } catch {
+    return null;
+  }
 }

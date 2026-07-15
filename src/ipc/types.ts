@@ -211,10 +211,18 @@ export interface SpokenExportOptions {
 export interface FilmScriptGenOptions {
   videoPath: string;
   title: string;
-  style: string;        // movie / series / variety / anime / doc / horror / funny / emotion / knowledge
-  language: string;     // 默认 'zh'
+  style: string;        // movie / series / variety / anime / doc / horror / funny / emotion / knowledge / sarcastic-suspense ...
+  styleName?: string;   // 风格展示名（如「毒舌悬疑」），用于提示词
+  language: string;     // zh / en / ja
   duration: number;     // 秒
   hint: string;         // 辅助提示
+  mode?: 'ai' | 'custom' | 'imitate'; // AI 帮我写 / 我有文案 / AI 仿写
+  view?: 'first' | 'third';           // 解说视角：第一/第三人称
+  model?: string;       // 解说模型：default / god（上帝视角）
+  analysisMode?: number;// 穿插原片密度 0-1
+  voiceId?: string;     // 语音克隆：知性女声 / 磁性男声 / 温暖男声
+  subtitleStyle?: string; // 字幕样式
+  analysis?: string;    // M2.6：影片视频分析结果（markdown），与所选参数共同驱动解说文案生成
 }
 
 // ---------------------------------------------------------------------------

@@ -940,18 +940,40 @@ async function mockInvoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
         language: a.language || 'zh',
         duration: typeof a.duration === 'number' ? a.duration : 180,
         hint: a.hint || '',
+        analysis: a.analysis || '',
       };
       const fmt = (sec: number) => {
         const m = Math.floor(sec / 60);
         const s = Math.floor(sec % 60);
         return `${m}:${String(s).padStart(2, '0')}`;
       };
+      // 从分析报告提取真实画面节点（SCENE_NODES 标记），字幕据此与画面对齐
+      const parseSceneNodes = (report: string): Array<[number, number]> => {
+        const m = /<!--SCENE_NODES:([^>]*)-->/.exec(report);
+        if (!m) return [];
+        return m[1].split(',').map((p) => {
+          const [s, e] = p.split('-').map((x) => parseFloat(x));
+          return [s, e] as [number, number];
+        }).filter((n) => Number.isFinite(n[0]) && Number.isFinite(n[1]) && n[1] > n[0]);
+      };
       const sections = ['开端', '铺垫', '冲突', '高潮', '反转', '结局'];
       const total = opts.duration;
+      const sceneNodes = parseSceneNodes(opts.analysis);
       const steps = [15, 30, 55, 85, 100];
       steps.forEach((p, i) => setTimeout(() => {
         if (i === steps.length - 1) {
-          const mockScript = sections.map((s, idx) => {
+          let mockScript: string;
+          if (sceneNodes.length >= 2) {
+            // 有真实画面节点：逐段生成字幕，start/end 对齐画面切换点
+            mockScript = sceneNodes.map((n, idx) => {
+              const sec = sections[Math.min(sections.length - 1, Math.floor((idx / sceneNodes.length) * sections.length))];
+              const body = idx === sceneNodes.length - 1
+                ? `画面收束，情绪落定。${opts.hint ? opts.hint : '本段落幕，敬请期待。'}`
+                : `【${opts.style}】此刻画面：情节随镜头推进，第 ${idx + 1} 个画面段落的张力被逐步释放。`;
+              return `[${sec}] ${fmt(n[0])}-${fmt(n[1])} ${body}`;
+            }).join('\n');
+          } else {
+          mockScript = sections.map((s, idx) => {
             const start = Math.floor((total * idx) / 6);
             const end = Math.floor((total * (idx + 1)) / 6);
             let body: string;
@@ -964,6 +986,7 @@ async function mockInvoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
             }
             return `[${s}] ${fmt(start)}-${fmt(end)} ${body}`;
           }).join('\n');
+          }
           const films = readJSON<any[]>(LS_FILM_PROJECTS, []);
           const film = films.find((f) => f.id === projectId);
           if (film) {
@@ -977,6 +1000,48 @@ async function mockInvoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
       }, 300 + i * 500));
       return taskId as any;
     }
+
+    // ========== M2.6：影片视频分析（多模态大模型）mock ==========
+    case 'submit_film_video_analysis':
+    case 'film_video_analysis': {
+      const taskId = 'mock-' + Math.random().toString(36).slice(2);
+      const ch = a.on_progress;
+      const title = a.title || '未命名影片';
+      const start = typeof a.start === 'number' ? a.start : 0;
+      const end = typeof a.end === 'number' ? a.end : 180;
+      const dur = Math.max(1, Math.round(end - start));
+      const nBlocks = Math.min(48, Math.max(4, Math.round(dur / 6)));
+      const STEPS: { step: number; progress: number; message: string }[] = [
+        { step: 1, progress: 18, message: '提取视频帧 100%' },
+        { step: 2, progress: 32, message: `检测场景切换点完成（${Math.max(1, Math.round(dur / 20))} 个）` },
+        { step: 3, progress: 46, message: '多维度特征编码中 100%' },
+        { step: 4, progress: 58, message: '深度语义理解中' },
+        { step: 5, progress: 68, message: `语义块 ${nBlocks}/${nBlocks} 解析中` },
+        { step: 6, progress: 80, message: '深度语义理解中' },
+        { step: 7, progress: 87, message: '叙事结构生成中' },
+        { step: 8, progress: 94, message: '解说词生成中' },
+        { step: 9, progress: 99, message: '输出流水线生成中' },
+      ];
+      STEPS.forEach((s, i) => setTimeout(() => {
+        ch && ch._on && ch._on({ taskId, progress: s.progress, status: 'running', message: s.message, payload: { step: s.step } });
+      }, 350 + i * 420));
+      setTimeout(() => {
+        const fmtTs = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
+        // mock 场景节点（相对片段秒数，均匀切分模拟真实场景检测结果）
+        const nodes: Array<[number, number]> = Array.from({ length: nBlocks }, (_, i) => [
+          Math.round((dur * i) / nBlocks),
+          Math.round((dur * (i + 1)) / nBlocks),
+        ]);
+        const blockList = nodes.map((n, i) => `${i + 1}. \`${fmtTs(n[0])} - ${fmtTs(n[1])}\``).join('\n');
+        const nodesRaw = nodes.map((n) => `${n[0].toFixed(2)}-${n[1].toFixed(2)}`).join(',');
+        const report = `# 影片理解报告：${title}\n\n**风格**：默认  \n**分析片段时长**：约 ${dur} 秒  \n**提取帧数**：${Math.max(6, Math.round(dur / 4))}  \n**场景切换点**：${Math.max(1, Math.round(dur / 20))} 个  \n**平均帧体积**：82 KB\n\n## 一、深度语义理解\n（mock）影片以明快节奏展开，画面信息密度适中，人物情绪随情节起伏，整体基调偏轻松。\n\n## 二、画面时间节点（语义块划分，供字幕与画面对齐）\n${blockList}\n\n<!--SCENE_NODES:${nodesRaw}-->\n\n## 三、语义要点提炼\n（mock）按语义块提炼核心要点，便于后续解说与剪辑对齐。\n\n## 四、叙事结构（六段式）\n（mock）开端/铺垫/冲突/高潮/反转/结局六段式占位结构。\n\n## 五、解说词初稿\n（mock）这是一段关于《${title}》的通用解说，可在解说工作台基于实际理解进一步润色与配音。`;
+        ch && ch._on && ch._on({ taskId, progress: 100, status: 'done', message: '影片分析完成', payload: { step: 10, report } });
+      }, 350 + STEPS.length * 420 + 300);
+      return taskId as any;
+    }
+
+    case 'get_film_analysis':
+      return null as any;
 
     default:
       throw new Error(`未知命令: ${cmd}`);

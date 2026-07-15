@@ -232,7 +232,7 @@ fn now_secs() -> i64 {
 pub async fn init(pool: &SqlitePool) -> Result<(), String> {
     let stmts = [
         "CREATE TABLE IF NOT EXISTS film_categories(id TEXT PRIMARY KEY, name TEXT, \"order\" INT, editable INT DEFAULT 1)",
-        "CREATE TABLE IF NOT EXISTS film_projects(id TEXT PRIMARY KEY, category_id TEXT, title TEXT, cover TEXT, status TEXT, tags TEXT, script TEXT, created_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS film_projects(id TEXT PRIMARY KEY, category_id TEXT, title TEXT, cover TEXT, status TEXT, tags TEXT, script TEXT, analysis TEXT, created_at INTEGER)",
         "CREATE TABLE IF NOT EXISTS edit_timelines(id TEXT PRIMARY KEY, project_id TEXT, tracks TEXT, clips TEXT, updated_at INTEGER)",
         "CREATE TABLE IF NOT EXISTS spoken_videos(id TEXT PRIMARY KEY, path TEXT, duration REAL, transcript TEXT, script TEXT, clean_script TEXT, created_at INTEGER)",
         "CREATE TABLE IF NOT EXISTS spoken_edits(id TEXT PRIMARY KEY, video_id TEXT, issue_type TEXT, start REAL, end REAL, text TEXT, suggestion TEXT, accepted INT DEFAULT 0)",
@@ -254,8 +254,11 @@ pub async fn init(pool: &SqlitePool) -> Result<(), String> {
             .await
             .map_err(|e| format!("建表失败: {e}"))?;
     }
-    // 兼容旧库：film_projects 早期无 script 列，按需补列（全新库建表已含，PRAGMA 探测到会跳过）
+    // 兼容旧库：film_projects 早期无 script / analysis 列，按需补列（全新库建表已含，PRAGMA 探测到会跳过）
     let _ = sqlx::query("ALTER TABLE film_projects ADD COLUMN script TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE film_projects ADD COLUMN analysis TEXT")
         .execute(pool)
         .await;
     seed_defaults(pool).await?;
@@ -712,6 +715,27 @@ pub async fn film_project_set_script(pool: &SqlitePool, id: &str, script: &str) 
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 写入影片视频分析结果（film_video_analysis 工作流的结果落库点，存 Markdown 报告）。
+pub async fn film_project_set_analysis(pool: &SqlitePool, id: &str, analysis: &str) -> Result<(), String> {
+    sqlx::query("UPDATE film_projects SET analysis=? WHERE id=?")
+        .bind(analysis)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 读取影片视频分析结果（Markdown 报告），未分析返回 None。
+pub async fn film_project_get_analysis(pool: &SqlitePool, id: &str) -> Result<Option<String>, String> {
+    let row: Option<(Option<String>,)> = sqlx::query_as("SELECT analysis FROM film_projects WHERE id=?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(row.and_then(|r| r.0).filter(|s| !s.trim().is_empty()))
 }
 
 pub async fn film_project_delete(pool: &SqlitePool, id: &str) -> Result<(), String> {

@@ -1,10 +1,11 @@
 // 步骤 5：视频解说功能（核心工作台，顶部切换 + 3 模式 + 4 风格选择 + 视角/语言/时长/辅助/4 设置卡 + 开始生成按钮）
 // v2.0 重构：替代 v1.0 的 6 步向导分散 + NarrationFlowModal 弹窗
 
-import { useState } from 'react';
-import { submitFilmScriptGen } from '../../ipc/providers';
+import { useState, useEffect } from 'react';
+import { submitFilmScriptGen, getFilmAnalysis, submitFilmVideoAnalysis } from '../../ipc/providers';
 import { useApp } from '../../state/AppContext';
 import type { ProgressMsg, FilmScriptGenOptions } from '../../ipc/types';
+import VideoAnalysisModal from './VideoAnalysisModal';
 
 interface Props {
   videoPath: string;
@@ -59,6 +60,25 @@ export default function Step5Narration({
   const [analysisMode, setAnalysisMode] = useState(0.1);
   const [voiceId, setVoiceId] = useState('知性女声');
   const [subtitleStyle, setSubtitleStyle] = useState('经典-白字黑边');
+  const [model, setModel] = useState('default');
+
+  // M2.6：影片视频分析（在「开始生成」时触发，十步进度）
+  const [analysisOpen, setAnalysisOpen] = useState(false);
+  const [analysisStep, setAnalysisStep] = useState(0);
+  const [analysisFailed, setAnalysisFailed] = useState(false);
+  const [analysisFailReason, setAnalysisFailReason] = useState('');
+  const [analysisReport, setAnalysisReport] = useState<string | null>(null);
+  const [analysisHadError, setAnalysisHadError] = useState(false);
+
+  // 影片理解报告：优先展示本次「开始生成」时分析的结果；重新进入解说工作台时从库回填
+  const [analysisText, setAnalysisText] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    if (projectId && !projectId.startsWith('local-')) {
+      getFilmAnalysis(projectId)
+        .then((r) => { if (r) setAnalysisText(r); })
+        .catch(() => {});
+    }
+  }, [projectId]);
 
   // 顶部切换：解说工作台 ↔ 分镜工作台
   const [topTab, setTopTab] = useState<'narration' | 'storyboard'>('narration');
@@ -66,26 +86,75 @@ export default function Step5Narration({
   const [asrFailed, setAsrFailed] = useState(false);
   const [asrReason, setAsrReason] = useState('');
 
-  const submitGen = async () => {
-    setBusy(true);
-    setAsrFailed(false);
-    setAsrReason('');
-    setTaskPct(10);
-    setTaskMsg('准备生成');
-    try {
+  // 阶段一：影片视频分析（十步进度），返回最终报告文本（失败则返回空串）
+  const runAnalysisPhase = (): Promise<string> =>
+    new Promise<string>((resolve) => {
+      setAnalysisOpen(true);
+      setAnalysisStep(0);
+      setAnalysisFailed(false);
+      setAnalysisFailReason('');
+      setAnalysisReport(null);
+      submitFilmVideoAnalysis(
+        projectId,
+        {
+          videoPath: videoPath || '',
+          title: videoName || styleName || '未命名视频',
+          styleName,
+          start: rangeStart,
+          end: rangeEnd,
+        },
+        (m: ProgressMsg) => {
+          const st = (m.payload as any)?.step;
+          if (typeof st === 'number') setAnalysisStep(st);
+          if (m.status === 'done') {
+            const rep = (m.payload as any)?.report;
+            const reportStr = typeof rep === 'string' ? rep : '';
+            setAnalysisReport(reportStr);
+            setAnalysisText(reportStr);
+            setAnalysisOpen(false);
+            resolve(reportStr);
+          } else if (m.status === 'failed') {
+            setAnalysisFailed(true);
+            setAnalysisFailReason(m.message || '分析失败');
+            setAnalysisHadError(true);
+            setAnalysisOpen(false);
+            resolve(''); // 分析失败时仍按所选参数 + ASR 生成解说
+          }
+        },
+      ).catch((err: any) => {
+        setAnalysisFailed(true);
+        setAnalysisFailReason(String(err?.message || err));
+        setAnalysisHadError(true);
+        setAnalysisOpen(false);
+        resolve('');
+      });
+    });
+
+  // 阶段二：结合影片分析结果 + 所选参数，生成解说文案
+  const runNarrationPhase = (report: string): Promise<void> =>
+    new Promise<void>((resolve) => {
       const targetMin = DURATION_TO_MIN[duration] || 3;
       const seconds = Math.round(targetMin * 60);
+      const langCode = language === 'CN' ? 'zh' : language === 'EN' ? 'en' : language === 'JA' ? 'ja' : 'zh';
       const opts: FilmScriptGenOptions = {
         videoPath: videoPath || '',
         title: videoName || styleName || '未命名视频',
         style,
-        language,
+        styleName,
+        language: langCode,
         duration: seconds,
         hint,
+        mode,
+        view,
+        model,
+        analysisMode,
+        voiceId,
+        subtitleStyle,
+        analysis: report,
       };
-      setTaskPct(15);
-      setTaskMsg('抽取音轨');
-      await submitFilmScriptGen(projectId, opts, (m: ProgressMsg) => {
+      setTaskPct(0);
+      setTaskMsg('生成解说文案');
+      submitFilmScriptGen(projectId, opts, (m: ProgressMsg) => {
         setTaskPct(m.progress);
         setTaskMsg(m.message || '');
         if (m.status === 'done') {
@@ -95,13 +164,32 @@ export default function Step5Narration({
           setAsrReason(payload?.asrReason || '');
           setBusy(false);
           setResult(script);
+          resolve();
         } else if (m.status === 'failed') {
-          // 降级占位
           const fallback = buildFallbackScript(videoName, styleName, targetMin);
           setBusy(false);
           setResult(fallback);
+          resolve();
         }
       });
+    });
+
+  const submitGen = async () => {
+    setBusy(true);
+    setAsrFailed(false);
+    setAsrReason('');
+    setResult(null);
+    setAnalysisHadError(false);
+    try {
+      // 「我有文案」模式：直接使用用户文案，无需影片视频分析 / LLM
+      if (mode === 'custom' && hint.trim()) {
+        setBusy(false);
+        setResult(hint.trim());
+        return;
+      }
+      // 阶段一：影片视频分析（十步进度）→ 阶段二：结合分析结果 + 所选参数生成解说文案
+      const report = await runAnalysisPhase();
+      await runNarrationPhase(report);
     } catch (e) {
       setBusy(false);
       const fallback = buildFallbackScript(videoName, styleName, 3);
@@ -109,6 +197,17 @@ export default function Step5Narration({
       console.error('[film-step5] generate failed:', e);
     }
   };
+
+  // 供 VideoAnalysisModal 使用的总体进度（按步数折算百分比）
+  const analysisProgress: ProgressMsg | null = analysisOpen
+    ? {
+        taskId: 'analysis',
+        progress: (analysisStep / 10) * 100,
+        status: analysisFailed ? 'failed' : 'running',
+        message: analysisFailed ? analysisFailReason : undefined,
+        payload: { step: analysisStep },
+      }
+    : null;
 
   return (
     <div className="film-step5">
@@ -141,6 +240,14 @@ export default function Step5Narration({
             </div>
             <button className="btn sm ghost" onClick={onBack}>重新选择</button>
           </div>
+
+          {/* M2.6：影片视频分析总结报告 */}
+          {analysisText ? (
+            <details className="film-step5__analysis" open>
+              <summary>🎞 影片理解报告（点击「开始生成」时由多模态大模型分析）</summary>
+              <pre className="film-step5__analysis-body">{analysisText}</pre>
+            </details>
+          ) : null}
 
           {/* 3 模式 tab */}
           <div className="film-step5__mode-tabs">
@@ -242,7 +349,7 @@ export default function Step5Narration({
           <div className="film-step5__settings">
             <div className="film-step5__setting-card">
               <div className="film-step5__setting-title">解说模型</div>
-              <select className="form-select" defaultValue="default">
+              <select className="form-select" value={model} onChange={(e) => setModel(e.target.value)}>
                 <option value="default">默认（新手指荐）</option>
                 <option value="god">上帝视角模式（推）</option>
               </select>
@@ -300,7 +407,25 @@ export default function Step5Narration({
                   建议：到「设置」配置 XiaomiMimo ASR 密钥，或在上方补充「解说辅助」后再生成。
                 </div>
               )}
-              <div className="film-step5__script">{result}</div>
+              {!asrFailed && analysisHadError && (
+                <div className="film-step5__warn">
+                  ⚠ 影片视频分析未成功（原因：{analysisFailReason || '未知'}），已基于所选参数与视频语音（ASR）生成解说文案，可能与画面实际内容存在偏差。建议检查「设置 → 接口」中的多模态大模型（Ollama 等）配置后重试。
+                </div>
+              )}
+              {/* 结构化解说文案展示（带时间节点的分段卡片） */}
+              <div className="film-step5__script">
+                {parseScriptSegments(result).map((seg, idx) => (
+                  <div key={idx} className="film-step5__seg">
+                    <div className="film-step5__seg-head">
+                      {seg.section && <span className="film-step5__seg-tag">{seg.section}</span>}
+                      {seg.start && seg.end && (
+                        <span className="film-step5__seg-time">{seg.start} – {seg.end}</span>
+                      )}
+                    </div>
+                    <div className="film-step5__seg-body">{seg.dialogue}</div>
+                  </div>
+                ))}
+              </div>
               <div className="film-step5__result-actions">
                 <button className="btn primary" onClick={() => onGenerated(result)}>进入分镜工作台 →</button>
                 <button className="btn ghost" onClick={() => { setResult(null); setAsrFailed(false); setAsrReason(''); }}>重新生成</button>
@@ -314,6 +439,20 @@ export default function Step5Narration({
           <p className="muted">分镜工作台在 M5（创作下）实施后启用。当前先完成解说生成。</p>
           <button className="btn sm" onClick={() => setTopTab('narration')}>← 返回解说工作台</button>
         </div>
+      )}
+
+      {/* M2.6：影片视频分析弹窗（点击「开始生成」时触发，十步进度） */}
+      {analysisOpen && (
+        <VideoAnalysisModal
+          open={analysisOpen}
+          progress={analysisProgress}
+          currentStep={analysisStep}
+          failed={analysisFailed}
+          failReason={analysisFailReason}
+          report={analysisReport}
+          onContinue={() => setAnalysisOpen(false)}
+          onClose={() => setAnalysisOpen(false)}
+        />
       )}
 
       <div style={{ marginTop: 16 }}>
@@ -349,10 +488,40 @@ function fmtSec(sec: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+/** 解析解说文案为结构化分段：[section] start-end dialogue 或 start-end dialogue */
+interface ScriptSegment {
+  section: string;    // 段落标签（开端/铺垫/…），可能为空
+  start: string;      // "0:00"
+  end: string;        // "0:30"
+  dialogue: string;   // 解说词正文
+  raw: string;        // 原始行（用于回退）
+}
+
+function parseScriptSegments(script: string): ScriptSegment[] {
+  const lines = script.split('\n').filter((l) => l.trim());
+  const segments: ScriptSegment[] = [];
+  // 匹配 [section] start-end dialogue 或 start-end dialogue
+  const re = /^\[([^\]]+)\]\s+(\S+?)-(\S+?)\s+(.+)$/;   // 带段落标签
+  const rePlain = /^(\S+?)-(\S+?)\s*(.+)$/;               // 无段落标签
+  for (const line of lines) {
+    const m = line.match(re);
+    if (m) {
+      segments.push({ section: m[1], start: m[2], end: m[3], dialogue: m[4].trim(), raw: line });
+      continue;
+    }
+    const mp = line.match(rePlain);
+    if (mp) {
+      segments.push({ section: '', start: mp[1], end: mp[2], dialogue: mp[3].trim(), raw: line });
+      continue;
+    }
+    // 无法解析的行作为纯文本段
+    segments.push({ section: '', start: '', end: '', dialogue: line.trim(), raw: line });
+  }
+  return segments;
+}
+
 function countSections(s: string): number {
-  const tagged = s.split('\n').filter((l) => /^\[/.test(l.trim())).length;
-  if (tagged > 0) return tagged;
-  return s.split('\n').filter((l) => l.trim()).length;
+  return parseScriptSegments(s).length;
 }
 
 function estMin(s: string): number {

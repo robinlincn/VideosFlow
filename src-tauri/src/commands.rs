@@ -934,9 +934,17 @@ pub async fn submit_film_script_gen(
     video_path: String,
     title: String,
     style: String,
+    style_name: String,
     language: String,
     duration: u32,
     hint: String,
+    mode: String,
+    view: String,
+    model: String,
+    analysis_mode: f32,
+    voice_id: String,
+    subtitle_style: String,
+    analysis: Option<String>,
     on_progress: Channel<ProgressMsg>,
 ) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
@@ -950,9 +958,53 @@ pub async fn submit_film_script_gen(
             "videoPath": video_path,
             "title": title,
             "style": style,
+            "styleName": style_name,
             "language": language,
             "duration": duration,
             "hint": hint,
+            "mode": mode,
+            "view": view,
+            "model": model,
+            "analysisMode": analysis_mode,
+            "voiceId": voice_id,
+            "subtitleStyle": subtitle_style,
+            "analysis": analysis.unwrap_or_default(),
+        }),
+        channel: on_progress,
+    };
+    state.task_tx.send(job).await.map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_film_analysis(state: State<'_, AppState>, project_id: String) -> Result<Option<String>, String> {
+    db::film_project_get_analysis(&state.pool, &project_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn submit_film_video_analysis(
+    state: State<'_, AppState>,
+    project_id: String,
+    video_path: String,
+    start: f64,
+    end: f64,
+    title: String,
+    style_name: String,
+    on_progress: Channel<ProgressMsg>,
+) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    db::task_create(&state.pool, &id, "film_video_analysis", Some(&project_id)).await?;
+    let job = TaskJob {
+        id: id.clone(),
+        kind: "film_video_analysis".into(),
+        project_id: Some(project_id.clone()),
+        payload: serde_json::json!({
+            "projectId": project_id,
+            "videoPath": video_path,
+            "start": start,
+            "end": end,
+            "title": title,
+            "styleName": style_name,
         }),
         channel: on_progress,
     };

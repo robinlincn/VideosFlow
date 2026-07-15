@@ -141,6 +141,8 @@ pub fn run() {
             commands::submit_storyboard_gen,
             commands::submit_image_gen,
             commands::submit_film_script_gen,
+            commands::submit_film_video_analysis,
+            commands::get_film_analysis,
             commands::get_video_server_url,
         ])
         .run(tauri::generate_context!())

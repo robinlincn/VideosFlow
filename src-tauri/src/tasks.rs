@@ -7,7 +7,11 @@ use tauri::ipc::Channel;
 use tokio::sync::mpsc;
 
 use std::path::Path;
+use std::process::Command;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use tokio::time::sleep;
 
 use reqwest::Client;
 use sqlx::sqlite::SqlitePool;
@@ -443,6 +447,25 @@ async fn run_job(pool: &SqlitePool, client: &Client, port: u16, data_dir: &Path,
             }
             return;
         }
+        "film_video_analysis" => {
+            match run_film_video_analysis(pool, client, data_dir, &job, emit.clone()).await {
+                Ok(()) => {
+                    // 完成态已在函数内以 step=10 发出；此处仅兜底确保状态落库
+                    db::task_update(pool, &job.id, "done", 100.0, "影片分析完成").await.ok();
+                }
+                Err(e) => {
+                    db::task_update(pool, &job.id, "failed", 100.0, &e).await.ok();
+                    emit(ProgressMsg {
+                        task_id: job.id.clone(),
+                        progress: 100.0,
+                        status: "failed".into(),
+                        message: Some(e),
+                        payload: None,
+                    });
+                }
+            }
+            return;
+        }
         _ => {}
     }
 
@@ -465,9 +488,9 @@ async fn run_chat(pool: &SqlitePool, client: &Client, _port: u16, job: &TaskJob)
     let row = db::get_by_kind(pool, "llm").await?;
     let key = cred::get_key(pool, "llm").await
         .map_err(|e| format!("读取凭据库失败：{e}（请尝试在设置页重新保存 Key）"))?;
-    let key = key.ok_or_else(|| "尚未保存 LLM（Agnes）API Key，请先在设置页保存 Key".to_string())?;
+    let key = key.ok_or_else(|| "尚未保存大模型 API Key，请先在设置页保存 Key".to_string())?;
     if row.base_url.is_empty() {
-        return Err("LLM 网关 base_url 未配置（请检查设置页 Agnes base_url）".into());
+        return Err("LLM 网关 base_url 未配置（请检查设置页大模型 base_url）".into());
     }
     let prompt = job
         .payload
@@ -506,7 +529,7 @@ async fn run_chat(pool: &SqlitePool, client: &Client, _port: u16, job: &TaskJob)
     let data: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("解析 Agnes 响应失败: {e}"))?;
+        .map_err(|e| format!("解析大模型响应失败: {e}"))?;
     if data.get("choices").is_none() {
         // 兜底：返回原始 JSON，便于排查 Agnes 非常规响应
         return Ok(serde_json::to_string_pretty(&data).unwrap_or_default());
@@ -733,6 +756,78 @@ async fn transcribe_asr(
 }
 
 /// 本地 ASR 推理：扫描 models 目录找到含 model.bin + config.json 的本地 faster-whisper 权重，
+/// 从「当前工作目录」与「当前可执行文件所在目录」逐级向上查找 src-tauri 下的脚本，返回绝对路径。
+/// 兼容 tauri dev（CWD=src-tauri）与不同启动方式，避免相对路径因 CWD 不同而落空。
+fn resolve_sidecar(rel: &str) -> Option<std::path::PathBuf> {
+    let rel = std::path::Path::new(rel);
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            roots.push(parent.to_path_buf());
+        }
+    }
+    for root in &roots {
+        let mut cur = root.clone();
+        loop {
+            let cand = cur.join(rel);
+            if cand.exists() {
+                return Some(cand);
+            }
+            match cur.parent() {
+                Some(p) => cur = p.to_path_buf(),
+                None => break,
+            }
+        }
+    }
+    None
+}
+
+/// 解析本地转写脚本的绝对路径。
+/// 优先使用 VF_TRANSCRIBE_SCRIPT 显式指定的路径；否则向上查找 python-sidecar/transcribe.py。
+fn resolve_transcribe_script() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("VF_TRANSCRIBE_SCRIPT") {
+        return std::path::PathBuf::from(p);
+    }
+    resolve_sidecar("python-sidecar/transcribe.py")
+        .unwrap_or_else(|| std::path::Path::new("python-sidecar/transcribe.py").to_path_buf())
+}
+
+/// 繁体中文 -> 简体中文兜底转换（调用 python-sidecar/to_simplified.py，依赖 opencc）。
+/// 转换脚本缺失或失败则原样返回，不阻塞主流程。
+fn to_simplified(text: &str) -> String {
+    if text.trim().is_empty() {
+        return text.to_string();
+    }
+    let script = match resolve_sidecar("python-sidecar/to_simplified.py") {
+        Some(s) => s,
+        None => return text.to_string(),
+    };
+    let py = std::env::var("VF_PYTHON").unwrap_or_else(|_| "python".to_string());
+    use std::process::Stdio;
+    let child = std::process::Command::new(&py)
+        .arg(&script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    match child {
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            match child.wait_with_output() {
+                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+                _ => text.to_string(),
+            }
+        }
+        Err(_) => text.to_string(),
+    }
+}
+
 /// 调用 python-sidecar/transcribe.py（faster-whisper）做本地转写，返回 segments。
 /// 支持环境变量 VF_PYTHON（Python 解释器路径）与 VF_TRANSCRIBE_SCRIPT（脚本路径）。
 async fn transcribe_local(audio_path: &str) -> (Vec<db::AsrSegment>, String, f64, bool, String) {
@@ -758,8 +853,11 @@ async fn transcribe_local(audio_path: &str) -> (Vec<db::AsrSegment>, String, f64
     };
     // 调用本地推理脚本（faster-whisper / Python）
     let py = std::env::var("VF_PYTHON").unwrap_or_else(|_| "python".to_string());
-    let script = std::env::var("VF_TRANSCRIBE_SCRIPT")
-        .unwrap_or_else(|_| "python-sidecar/transcribe.py".to_string());
+    let script = resolve_transcribe_script();
+    if !script.exists() {
+        return (Vec::new(), "zh".to_string(), 0.0, true,
+            format!("未找到本地推理脚本 {}，请用 VF_TRANSCRIBE_SCRIPT 指定 transcribe.py 的绝对路径", script.display()));
+    }
     let out = std::process::Command::new(&py)
         .arg(&script)
         .arg("--model").arg(&model_path)
@@ -1388,7 +1486,7 @@ pub async fn run_llm_json(
     api_key: &str,
     prompt: &str,
 ) -> Result<serde_json::Value, String> {
-    let base = base_url.trim_end_matches('/');
+    let base = fix_local_scheme(base_url.trim_end_matches('/'));
     let url = format!("{base}/chat/completions");
     let body = serde_json::json!({
         "model": model,
@@ -1403,20 +1501,20 @@ pub async fn run_llm_json(
         .timeout(std::time::Duration::from_secs(60))
         .send()
         .await
-        .map_err(|e| format!("Agnes 调用失败: {e}"))?;
+        .map_err(|e| format!("大模型调用失败: {e}"))?;
     if !resp.status().is_success() {
         let st = resp.status();
         let txt = resp.text().await.unwrap_or_default();
-        return Err(format!("Agnes 返回 {st}: {txt}"));
+        return Err(format!("大模型返回 {st}: {txt}"));
     }
-    let v: serde_json::Value = resp.json().await.map_err(|e| format!("解析 Agnes 响应失败: {e}"))?;
+    let v: serde_json::Value = resp.json().await.map_err(|e| format!("解析大模型响应失败: {e}"))?;
     let text = v
         .get("choices")
         .and_then(|c| c.get(0))
         .and_then(|c| c.get("message"))
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
-        .ok_or_else(|| "Agnes 响应缺 choices[0].message.content".to_string())?;
+        .ok_or_else(|| "大模型响应缺 choices[0].message.content".to_string())?;
     // 从文本里抠 JSON（兼容模型在内容里包 ```json``` 或前后多余文字）
     let s = text.trim();
     let json_str = if let Some(stripped) = s.strip_prefix("```json") {
@@ -1956,10 +2054,10 @@ async fn run_spoken_export(
 async fn llm_provider(pool: &SqlitePool) -> Result<(String, String, String), String> {
     let row = db::get_by_kind(pool, "llm").await?;
     if row.base_url.is_empty() {
-        return Err("LLM 网关 base_url 未配置（请检查设置页 Agnes base_url）".into());
+        return Err("LLM 网关 base_url 未配置（请检查设置页大模型 base_url）".into());
     }
     let key = cred::get_key(pool, "llm").await?
-        .ok_or_else(|| "尚未保存 LLM（Agnes）API Key，请先在设置页保存 Key".to_string())?;
+        .ok_or_else(|| "尚未保存大模型 API Key，请先在设置页保存 Key".to_string())?;
     if key.is_empty() {
         return Err("LLM Key 为空".into());
     }
@@ -2214,7 +2312,7 @@ async fn run_llm_text(
     api_key: &str,
     prompt: &str,
 ) -> Result<String, String> {
-    let base = base_url.trim_end_matches('/');
+    let base = fix_local_scheme(base_url.trim_end_matches('/'));
     let url = format!("{base}/chat/completions");
     let body = serde_json::json!({
         "model": model,
@@ -2229,11 +2327,11 @@ async fn run_llm_text(
         .timeout(std::time::Duration::from_secs(60))
         .send()
         .await
-        .map_err(|e| format!("Agnes 调用失败: {e}"))?;
+        .map_err(|e| format!("大模型调用失败: {e}"))?;
     if !resp.status().is_success() {
         let st = resp.status();
         let txt = resp.text().await.unwrap_or_default();
-        return Err(format!("Agnes 返回 {st}: {txt}"));
+        return Err(format!("大模型返回 {st}: {txt}"));
     }
     let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     let text = v
@@ -2242,8 +2340,118 @@ async fn run_llm_text(
         .and_then(|c| c.get("message"))
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
-        .ok_or_else(|| "Agnes 响应缺 choices[0].message.content".to_string())?;
+        .ok_or_else(|| "大模型响应缺 choices[0].message.content".to_string())?;
     Ok(text.trim().to_string())
+}
+
+/// 多模态（视觉）调用：将若干帧以 base64 JPEG 内联进 messages，走 OpenAI 兼容 /chat/completions。
+/// images: 已编码的 base64 JPEG（不含 data: 前缀）。每帧作为 image_url content 传入。
+async fn run_llm_vision(
+    client: &Client,
+    base_url: &str,
+    model: &str,
+    api_key: &str,
+    prompt: &str,
+    images: &[String],
+    provider_name: &str,
+) -> Result<String, String> {
+    let base = fix_local_scheme(base_url.trim_end_matches('/'));
+    let url = format!("{base}/chat/completions");
+    let mut content: Vec<serde_json::Value> = vec![serde_json::json!({ "type": "text", "text": prompt })];
+    for img in images {
+        content.push(serde_json::json!({
+            "type": "image_url",
+            "image_url": { "url": format!("data:image/jpeg;base64,{img}") }
+        }));
+    }
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": content }],
+        "max_tokens": 1500,
+        "temperature": 0.5,
+    });
+    let resp = client
+        .post(&url)
+        .bearer_auth(api_key)
+        .json(&body)
+        .timeout(Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|e| format!("视觉大模型（{provider_name}）调用失败: {e}"))?;
+    if !resp.status().is_success() {
+        let st = resp.status();
+        let txt = resp.text().await.unwrap_or_default();
+        return Err(format!("视觉大模型（{provider_name}）返回 {st}: {txt}"));
+    }
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let text = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| format!("视觉大模型（{provider_name}）响应缺 choices[0].message.content"))?;
+    Ok(text.trim().to_string())
+}
+
+/// 统计目录下 frame_*.jpg 数量。
+fn count_frames(dir: &std::path::Path) -> usize {
+    let mut n = 0usize;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("frame_") && name.ends_with(".jpg") {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// 列出 frame_*.jpg 绝对路径（按文件名排序）。
+fn list_frames(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut v: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("frame_") && name.ends_with(".jpg") {
+                v.push(e.path());
+            }
+        }
+    }
+    v.sort();
+    v
+}
+
+/// 将若干帧（Path）按上限采样并 base64 编码为 JPEG data（不含前缀）。
+fn base64_frames(frames: &[std::path::PathBuf], max_n: usize) -> Vec<String> {
+    let step = if frames.len() <= max_n {
+        1
+    } else {
+        (frames.len() + max_n - 1) / max_n
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < frames.len() && out.len() < max_n {
+        if let Ok(bytes) = std::fs::read(&frames[i]) {
+            out.push(B64.encode(bytes));
+        }
+        i += step;
+    }
+    out
+}
+
+/// 从 ffmpeg showinfo 的 stderr 中解析所有 pts_time（秒），用于场景切换点。
+fn parse_pts_times(s: &str) -> Vec<f64> {
+    let mut out = Vec::new();
+    for line in s.lines() {
+        if let Some(rest) = line.split("pts_time:").nth(1) {
+            if let Ok(v) = rest.trim().split_whitespace().next().unwrap_or("").parse::<f64>() {
+                out.push(v);
+            }
+        }
+    }
+    out
 }
 
 // ===========================================================================
@@ -2266,9 +2474,9 @@ pub fn split_script_to_sections(
         .filter(|s| !s.is_empty())
         .collect();
 
-    // 目标段数：3-8 区间
+    // 目标段数：3-8 区间；六段式标签（不足时循环取）
     let n = target_segments.clamp(3, 8);
-    // 每段约几句话
+    let section_labels = ["开端", "铺垫", "冲突", "高潮", "反转", "结局"];
     let per_seg = (raw_sentences.len() + n - 1) / n;
     let total_duration = if total_duration > 0.0 { total_duration } else { (n as f64) * 60.0 };
 
@@ -2276,13 +2484,17 @@ pub fn split_script_to_sections(
     for i in 0..n {
         let s_idx = i * per_seg;
         let e_idx = ((i + 1) * per_seg).min(raw_sentences.len());
-        let text = if s_idx < e_idx {
+        let body = if s_idx < e_idx {
             raw_sentences[s_idx..e_idx].join("。") + "。"
         } else {
             String::new()
         };
         let start = (i as f64 / n as f64) * total_duration;
         let end = ((i + 1) as f64 / n as f64) * total_duration;
+        let sec_label = section_labels.get(i % section_labels.len()).copied().unwrap_or("");
+        let start_ts = fmt_ts(start);
+        let end_ts = fmt_ts(end);
+        let text = format!("[{}] {}-{} {}", sec_label, start_ts, end_ts, body);
         out.push(db::TimelineClip {
             id: format!("s{i}"),
             source: "narration".into(),
@@ -2290,7 +2502,7 @@ pub fn split_script_to_sections(
             timeline_end: end,
             src_start: start,
             src_end: end,
-            label: String::new(),
+            label: sec_label.to_string(),
             text,
             flower: String::new(),
             transition: "none".into(),
@@ -2300,16 +2512,29 @@ pub fn split_script_to_sections(
     out
 }
 
-/// M2.5：生成六段式 narrative prompt（开端/铺垫/冲突/高潮/反转/结局）
-pub fn build_narration_prompt(
-    title: &str,
-    style: &str,
-    duration_min: u32,
-    asr_text: &str,
-    asr_failed: bool,
-) -> String {
-    let target_chars = duration_min * 270; // 每分钟约 270 字
-    let style_hint = match style {
+/// M2.5：解说文案提示词配置（综合写作风格 / 视角 / 语言 / 时长 / 辅助 / 模型 / 分析模式 / 语音克隆 / 字幕样式）
+pub struct NarrationConfig<'a> {
+    pub title: &'a str,
+    pub style: &'a str,
+    pub style_name: &'a str,
+    pub view: &'a str,         // first / third
+    pub language: &'a str,     // zh / en / ja
+    pub duration_min: u32,
+    pub hint: &'a str,
+    pub model: &'a str,        // default / god
+    pub analysis_mode: f32,    // 0-1 穿插原片密度
+    pub voice_id: &'a str,     // 知性女声 / 磁性男声 / 温暖男声
+    pub subtitle_style: &'a str,
+    pub asr_text: &'a str,
+    pub asr_failed: bool,
+    /** M2.6：影片视频分析结果（来自多模态大模型），作为内容理解核心依据，与所选参数共同驱动解说文案生成 */
+    pub analysis: &'a str,
+    /** M2.6：真实画面时间节点列表（来自场景检测/语义块，`1. 0:00-0:12` 逐行），字幕据此与画面对齐 */
+    pub scene_nodes: &'a str,
+}
+
+fn style_hint_for(style: &str, style_name: &str) -> String {
+    let mapped = match style {
         "movie" | "电影解说" => "电影解说风格，叙事沉稳、画面感强、善用比喻",
         "series" | "电视剧" => "电视剧风格，剧情连贯、悬念推进",
         "variety" | "综艺" => "综艺风格，活泼欢快、节奏明快",
@@ -2319,32 +2544,224 @@ pub fn build_narration_prompt(
         "funny" | "轻松搞笑" => "轻松搞笑风格，幽默诙谐、口语化",
         "emotion" | "激情解说" => "激情解说风格，情感浓烈、爆发力强",
         "knowledge" | "知识科普" => "知识科普风格，逻辑清晰、举例说明",
-        _ => "通用解说风格，叙事自然、有画面感",
+        "sarcastic-suspense" => "毒舌悬疑：以犀利毒舌口吻剖析悬疑案件，伏笔回收、逻辑闭环",
+        "sarcastic-action" => "毒舌动作：以毒舌视角拆解动作犯罪场面，战术拉满、反差套路",
+        "sarcastic-drama" => "毒舌短剧：以毒舌口吻解构下沉短剧，打脸爽点、人性算计",
+        "custom" => "",
+        _ => "",
     };
-    let asr_block = if asr_failed {
-        "（无法获取视频原声，请仅依据以上标题与风格自由创作一段解说文案，不要编造具体剧情细节）".to_string()
-    } else {
-        format!("视频转写（来自 ASR，可能不完整）：\n{asr_text}")
-    };
-    format!(
-        r#"请你为以下视频撰写一段时长约 {duration_min} 分钟的解说文案。
-视频标题：{title}
-解说风格：{style_hint}
-视频时长：{duration_min} 分钟（≈ {target_chars} 字）
+    if mapped.is_empty() {
+        if !style_name.is_empty() {
+            return format!("「{}」风格，紧扣该风格基调与语气", style_name);
+        }
+        return "通用解说风格，叙事自然、有画面感".to_string();
+    }
+    mapped.to_string()
+}
 
+fn voice_hint_for(voice: &str) -> String {
+    match voice {
+        "磁性男声" => "配音 tone 参考：沉稳磁性、富有厚度（文案可偏大气）",
+        "温暖男声" => "配音 tone 参考：温暖亲和、如老友聊天（文案可偏轻松）",
+        "知性女声" => "配音 tone 参考：温柔知性、娓娓道来（文案可偏细腻）",
+        _ => "",
+    }
+    .to_string()
+}
+
+/// M2.6：从影片分析报告中提取「真实画面时间节点」（相对片段秒数）。
+/// 优先解析机器标记 `<!--SCENE_NODES:0.00-12.30,12.30-25.10-->`；
+/// 找不到则回退解析「画面时间节点/语义块划分」里的 `m:ss - m:ss` 文本。
+pub fn extract_scene_nodes(report: &str) -> Vec<(f64, f64)> {
+    // 1) 机器标记
+    if let Some(i) = report.find("<!--SCENE_NODES:") {
+        let rest = &report[i + "<!--SCENE_NODES:".len()..];
+        if let Some(j) = rest.find("-->") {
+            let body = &rest[..j];
+            let mut out: Vec<(f64, f64)> = Vec::new();
+            for pair in body.split(',') {
+                let mut it = pair.splitn(2, '-');
+                let s = it.next().unwrap_or("").trim().parse::<f64>().ok();
+                let e = it.next().unwrap_or("").trim().parse::<f64>().ok();
+                if let (Some(s), Some(e)) = (s, e) {
+                    if e > s {
+                        out.push((s, e));
+                    }
+                }
+            }
+            if !out.is_empty() {
+                return out;
+            }
+        }
+    }
+    // 2) 回退：逐行扫描「数字:数字」时间令牌，取每行前两个作为 (start, end)
+    let mut out: Vec<(f64, f64)> = Vec::new();
+    for line in report.lines() {
+        if !line.contains(" - ") {
+            continue; // 仅解析含区间分隔符的语义块列表行
+        }
+        let toks = scan_ts_tokens(line);
+        if toks.len() >= 2 && toks[1] > toks[0] {
+            out.push((toks[0], toks[1]));
+        }
+    }
+    out
+}
+
+/// 扫描字符串中所有形如 `m:ss` / `mm:ss` 的时间令牌，返回对应秒数。
+fn scan_ts_tokens(s: &str) -> Vec<f64> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out: Vec<f64> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_ascii_digit() {
+            let mut j = i;
+            while j < chars.len() && chars[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j < chars.len() && chars[j] == ':' {
+                let mut k = j + 1;
+                while k < chars.len() && chars[k].is_ascii_digit() {
+                    k += 1;
+                }
+                if k > j + 1 {
+                    let tok: String = chars[i..k].iter().collect();
+                    out.push(parse_timestamp(&tok));
+                    i = k;
+                    continue;
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// 将时间节点格式化为提示词可读列表：`1. 0:00-0:12`。
+fn format_scene_nodes(nodes: &[(f64, f64)]) -> String {
+    nodes
+        .iter()
+        .enumerate()
+        .map(|(i, (s, e))| format!("{}. {}-{}", i + 1, fmt_ts(*s), fmt_ts(*e)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// M2.5：生成六段式 narrative prompt（开端/铺垫/冲突/高潮/反转/结局）
+/// 综合所有解说选项；强约束简体中文（zh）+ 每段带时间轴。
+/// M2.6：若提供真实画面时间节点（scene_nodes），字幕切分严格对齐画面切换点。
+pub fn build_narration_prompt(cfg: &NarrationConfig) -> String {
+    let target_chars = cfg.duration_min * 270; // 每分钟约 270 字
+    let style_hint = style_hint_for(cfg.style, cfg.style_name);
+    let view_hint = match cfg.view {
+        "first" => "解说视角：第一人称，使用「我」的口吻，增强代入感",
+        _ => "解说视角：第三人称旁观，客观冷静、上帝视角点评",
+    };
+    let (lang_hint, simp_req) = match cfg.language {
+        "en" => ("解说语言：English（使用英文输出）", String::new()),
+        "ja" => ("解说语言：日本語（使用日文输出）", String::new()),
+        _ => (
+            "解说语言：中文",
+            "【重要】必须使用简体中文输出，严禁繁体中文（如「說/來/這/們/時/會/國/產/對/發/開/長」等一律改为简体「说/来/这/们/时/会/国/产/对/发/开/长」）".to_string(),
+        ),
+    };
+    let model_hint = if cfg.model == "god" {
+        "叙事模式：上帝视角（全知全能），点破人物心理、命运伏笔与剧情暗线"
+    } else {
+        "叙事模式：常规解说"
+    };
+    let analysis_hint = if cfg.analysis_mode > 0.0 {
+        let pct = (cfg.analysis_mode * 100.0).round() as u32;
+        format!("穿插原片：在解说中酌情引用原片金句或呼应画面，约占总篇幅 {pct}%")
+    } else {
+        "穿插原片：不引用原片，纯原创解说".to_string()
+    };
+    let voice_hint = voice_hint_for(cfg.voice_id);
+    let subtitle_hint = if cfg.subtitle_style.contains("无边框") {
+        "字幕样式：简约无边框，文案需极简短句、易读"
+    } else if cfg.subtitle_style.contains("阴影") {
+        "字幕样式：阴影黑字，文案句式适中"
+    } else {
+        "字幕样式：经典白字黑边，文案可正常长短句"
+    };
+    let hint_block = if !cfg.hint.trim().is_empty() {
+        format!("\n用户特别要求：{}", cfg.hint.trim())
+    } else {
+        String::new()
+    };
+    let analysis_block = if !cfg.analysis.trim().is_empty() {
+        format!(
+            "影片视频分析结果（来自多模态大模型，是内容理解的核心依据，请据此撰写贴合画面、不脱离实际内容的解说）：\n{}\n",
+            cfg.analysis.trim()
+        )
+    } else {
+        String::new()
+    };
+    let asr_block = if cfg.asr_failed {
+        "（无法获取视频原声，请仅依据标题与用户要求自由创作，不要编造与视频无关的虚假剧情）".to_string()
+    } else {
+        format!("视频语音内容参考（来自 ASR，可能不完整，仅作内容理解参考，不要照抄）：\n{}", cfg.asr_text)
+    };
+    // M2.6：真实画面时间节点（来自场景检测/语义块）——字幕据此与画面对齐
+    let has_nodes = cfg.scene_nodes.trim().len() > 0 && cfg.scene_nodes.lines().count() >= 2;
+    let nodes_block = if has_nodes {
+        format!(
+            "画面时间节点（来自真实场景检测/语义块划分，是「字幕与画面对齐」的硬性依据，请逐段对齐）：\n{}\n",
+            cfg.scene_nodes.trim()
+        )
+    } else {
+        String::new()
+    };
+    // 时间轴切分要求：有真实节点时严格对齐画面切换点，否则回退均匀分布
+    let timeline_req = if has_nodes {
+        "严格按上方「画面时间节点」逐段生成字幕：每个时间区间对应一条字幕，start/end 必须直接采用给定节点的时间（mm:ss），解说内容需描述或呼应该区间画面所发生的内容。相邻区间过短（<3 秒）可合并为一条；单个区间过长（>10 秒）可在其内部再等分为多条；但严禁跨越给定的画面切换点，也不得凭空杜撰给定之外的时间"
+    } else {
+        "每条字幕标注时间轴，格式 \"start\"-\"end\"（mm:ss-mm:ss，例如 \"0:00\"-\"0:08\"），按视频时长与画面节奏合理切分（建议每 5~8 秒一条），使字幕与画面对应"
+    };
+    let extra_hints: String = [view_hint, model_hint, subtitle_hint, &analysis_hint, &voice_hint]
+        .iter()
+        .filter(|h| !h.is_empty())
+        .map(|h| h.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"请为以下视频撰写一段时长约 {d} 分钟、与画面严格对齐的解说字幕（每条字幕对应一个画面时间区间）。
+视频标题：{title}
+写作风格：{style_hint}
+{lang_hint}
+{extra_hints}
+视频时长：{d} 分钟（≈ {target_chars} 字）
+{hint_block}
+
+{analysis_block}
+{nodes_block}
 {asr_block}
 
 要求：
-1. 遵循六段式故事结构：开端 → 铺垫 → 冲突 → 高潮 → 反转 → 结局
-2. 每段标注时间戳 [mm:ss-mm:ss]，段长 30-60 字
-3. 风格语气自然，匹配观众期待
-4. 字数 ≈ {target_chars} 字
-5. 用词口语化，避免空话
-
-返回严格 JSON 数组（不要任何额外文字）：
-[{{"start": "0:00", "end": "0:30", "dialogue": "...", "section": "开端"}}, ...]
-其中 section 必须是这 6 个之一：开端 / 铺垫 / 冲突 / 高潮 / 反转 / 结局
-"#
+1. 每条字幕用【真实原创】的解说词，体现上述风格与视角，不要照抄原片语音
+2. 若提供了「影片视频分析结果」，须以其为内容事实基础，确保解说与画面、情节一致，不得脱离实际内容
+3. {timeline_req}
+4. 整体遵循「开端→铺垫→冲突→高潮→反转→结局」的叙事弧，但字幕切分以画面时间节点为准（可将多条相邻字幕归入同一叙事阶段）
+5. 返回严格 JSON 数组（不要任何额外文字、不要 markdown 代码块）：
+[{{"start": "0:00", "end": "0:12", "dialogue": "解说词...", "section": "开端"}}, ...]
+其中 section 可选，若能判断请标注：开端 / 铺垫 / 冲突 / 高潮 / 反转 / 结局
+6. 字数 ≈ {target_chars} 字，口语化、避免空话，每条字幕精炼贴合对应画面
+{simp_req}
+"#,
+        d = cfg.duration_min,
+        title = cfg.title,
+        style_hint = style_hint,
+        lang_hint = lang_hint,
+        extra_hints = extra_hints,
+        target_chars = target_chars,
+        hint_block = hint_block,
+        analysis_block = analysis_block,
+        nodes_block = nodes_block,
+        asr_block = asr_block,
+        timeline_req = timeline_req,
+        simp_req = simp_req,
     )
 }
 
@@ -2376,6 +2793,15 @@ pub fn parse_narration_response(llm_text: &str, total_duration: f64, style: &str
 
         let start_sec = parse_timestamp(start_str);
         let end_sec = parse_timestamp(end_str);
+        let start_ts = fmt_ts(start_sec);
+        let end_ts = fmt_ts(end_sec);
+
+        // 文案文本带时间轴，方便后期加字幕；同时保留 label=段落名 供时间线使用
+        let text = if !section.is_empty() {
+            format!("[{}] {}-{} {}", section, start_ts, end_ts, dialogue)
+        } else {
+            format!("{}-{} {}", start_ts, end_ts, dialogue)
+        };
 
         shots.push(db::TimelineClip {
             id: format!("s{i}"),
@@ -2385,11 +2811,7 @@ pub fn parse_narration_response(llm_text: &str, total_duration: f64, style: &str
             src_start: start_sec,
             src_end: end_sec,
             label: section.clone(),
-            text: if !section.is_empty() && !dialogue.starts_with(&format!("[{}]", section)) {
-                format!("[{}] {}", section, dialogue)
-            } else {
-                dialogue
-            },
+            text,
             flower: String::new(),
             transition: "none".into(),
         });
@@ -2409,6 +2831,14 @@ fn parse_timestamp(s: &str) -> f64 {
     }
 }
 
+/// 秒 → m:ss
+fn fmt_ts(sec: f64) -> String {
+    let sec = sec.max(0.0);
+    let m = (sec / 60.0).floor() as i64;
+    let s = (sec % 60.0).round() as i64;
+    format!("{}:{}", m, format!("{:02}", s))
+}
+
 /// M2.5：异步任务 — 抽音轨 → ASR → 章节切分 → LLM 六段式 → 落 film_projects.script + 落 edit_timelines
 async fn run_film_script_gen(
     pool: &SqlitePool,
@@ -2421,10 +2851,18 @@ async fn run_film_script_gen(
     let project_id = job.project_id.clone().ok_or("film_script_gen 缺少 projectId")?;
     let video_path = job.payload.get("videoPath").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let style = job.payload.get("style").and_then(|v| v.as_str()).unwrap_or("movie").to_string();
+    let style_name = job.payload.get("styleName").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let language = job.payload.get("language").and_then(|v| v.as_str()).unwrap_or("zh").to_string();
     let duration = job.payload.get("duration").and_then(|v| v.as_u64()).unwrap_or(180) as u32;
     let hint = job.payload.get("hint").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let title = job.payload.get("title").and_then(|v| v.as_str()).unwrap_or("未知").to_string();
+    let mode = job.payload.get("mode").and_then(|v| v.as_str()).unwrap_or("ai").to_string();
+    let view = job.payload.get("view").and_then(|v| v.as_str()).unwrap_or("third").to_string();
+    let narration_model = job.payload.get("model").and_then(|v| v.as_str()).unwrap_or("default").to_string();
+    let analysis_mode = job.payload.get("analysisMode").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let voice_id = job.payload.get("voiceId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let subtitle_style = job.payload.get("subtitleStyle").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let analysis = job.payload.get("analysis").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let mut asr_failed = false;
     let mut asr_reason = String::new();
 
@@ -2480,7 +2918,7 @@ async fn run_film_script_gen(
     let target_segments = if duration <= 120 { 3 } else if duration <= 300 { 5 } else { 6 };
     let pre_sections = split_script_to_sections(if asr_failed { "" } else { &asr_text }, duration as f64, target_segments);
 
-    // 3) LLM 六段式生成
+    // 3) 文案生成
     emit(ProgressMsg {
         task_id: job.id.clone(),
         progress: 50.0,
@@ -2488,55 +2926,492 @@ async fn run_film_script_gen(
         message: Some("Agnes LLM 生成六段式文案".into()),
         payload: None,
     });
-    let (script, _degraded) = match llm_provider(pool).await {
-        Ok((base_url, model, key)) => {
-            let prompt = build_narration_prompt(&title, &style, duration, &asr_text, asr_failed);
-            match run_llm_text(client, &base_url, &model, &key, &prompt).await {
-                Ok(text) => {
-                    match parse_narration_response(&text, duration as f64, &style) {
-                        Ok(mut shots) => {
-                            // 用 ASR 文本覆盖每段 dialogue（更准确）
-                            let asr_sentences: Vec<&str> = asr_text
-                                .split(|c: char| "。！？!?，,；;\n".contains(c))
-                                .map(|s| s.trim())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                            let per = if asr_sentences.is_empty() { 0 } else { (asr_sentences.len() + shots.len() - 1) / shots.len().max(1) };
-                            for (i, s) in shots.iter_mut().enumerate() {
-                                let s_idx = i * per;
-                                let e_idx = ((i + 1) * per).min(asr_sentences.len());
-                                if s_idx < e_idx {
-                                    s.text = asr_sentences[s_idx..e_idx].join("。") + "。";
-                                }
+
+    // 「我有文案」模式：直接使用用户辅助作为最终文案（不调用 LLM）
+    let raw_script: String = if mode == "custom" && !hint.trim().is_empty() {
+        hint.trim().to_string()
+    } else {
+        match llm_provider(pool).await {
+            Ok((base_url, llm_model, key)) => {
+                // M2.6：从影片分析报告提取真实画面时间节点，字幕据此与画面对齐
+                let nodes = extract_scene_nodes(&analysis);
+                let scene_nodes = format_scene_nodes(&nodes);
+                let cfg = NarrationConfig {
+                    title: &title,
+                    style: &style,
+                    style_name: &style_name,
+                    view: &view,
+                    language: &language,
+                    duration_min: duration / 60,
+                    hint: &hint,
+                    model: &narration_model,
+                    analysis_mode,
+                    voice_id: &voice_id,
+                    subtitle_style: &subtitle_style,
+                    asr_text: &asr_text,
+                    asr_failed,
+                    analysis: &analysis,
+                    scene_nodes: &scene_nodes,
+                };
+                let prompt = build_narration_prompt(&cfg);
+                match run_llm_text(client, &base_url, &llm_model, &key, &prompt).await {
+                    Ok(text) => {
+                        match parse_narration_response(&text, duration as f64, &style) {
+                            Ok(shots) => {
+                                // 保留 LLM 生成的原创解说（含时间轴），不再用原始 ASR 覆盖
+                                let s: String = shots.iter().map(|x| x.text.clone()).collect::<Vec<_>>().join("\n");
+                                s
                             }
-                            let script_text: String = shots.iter().map(|s| s.text.clone()).collect::<Vec<_>>().join("\n");
-                            db::film_project_set_script(pool, &project_id, &script_text).await?;
-                            (script_text, false)
-                        }
-                        Err(e) => {
-                            // 降级 2：LLM 返回非 JSON，用 pre_sections
-                            let _ = e;
-                            let pre_text: String = pre_sections.iter().map(|s| s.text.clone()).collect::<Vec<_>>().join("\n");
-                            db::film_project_set_script(pool, &project_id, &pre_text).await?;
-                            (pre_text, true)
+                            Err(_e) => {
+                                // 降级 2：LLM 返回非 JSON，用 pre_sections
+                                pre_sections.iter().map(|x| x.text.clone()).collect::<Vec<_>>().join("\n")
+                            }
                         }
                     }
-                }
-                Err(_) => {
-                    // 降级 2：LLM 失败，用 ASR 切分
-                    let pre_text: String = pre_sections.iter().map(|s| s.text.clone()).collect::<Vec<_>>().join("\n");
-                    db::film_project_set_script(pool, &project_id, &pre_text).await?;
-                    (pre_text, true)
+                    Err(_) => {
+                        // 降级 2：LLM 失败，用 ASR 切分
+                        pre_sections.iter().map(|x| x.text.clone()).collect::<Vec<_>>().join("\n")
+                    }
                 }
             }
-        }
-        Err(_e) => {
-            // 降级 1：缺 Key
-            let pre_text: String = pre_sections.iter().map(|s| s.text.clone()).collect::<Vec<_>>().join("\n");
-            db::film_project_set_script(pool, &project_id, &pre_text).await?;
-            (pre_text, true)
+            Err(_e) => {
+                // 降级 1：缺 Key
+                pre_sections.iter().map(|x| x.text.clone()).collect::<Vec<_>>().join("\n")
+            }
         }
     };
+
+    // 繁体 -> 简体兜底（即使 LLM 偶发繁体或 ASR 上下文带入，也统一为简体）
+    let script = to_simplified(&raw_script);
+    db::film_project_set_script(pool, &project_id, &script).await?;
     let _ = language; // 抑制 unused 警告
     Ok((script, asr_failed, asr_reason))
+}
+
+// ===========================================================================
+// M2.6：影片视频分析（多模态大模型）— 确认视频范围后触发
+// 十步进度：①提取视频帧 ②检测场景切换点 ③多维度特征编码 ④深度语义理解
+// ⑤语义块解析 ⑥深度语义理解(二次) ⑦叙事结构生成 ⑧解说词生成 ⑨输出流水线 ⑩总结报告
+// ===========================================================================
+
+fn va_fmt_ts(sec: f64) -> String {
+    let s = sec.max(0.0);
+    let m = (s / 60.0).floor() as u32;
+    let ss = (s % 60.0).round() as u32;
+    format!("{}:{:02}", m, ss)
+}
+
+/// 本地大模型（Ollama 等）默认只提供 HTTP；若设置里误填 https://localhost，
+/// 这里自动规整为 http，避免 TLS 握手失败导致「error sending request」。
+fn fix_local_scheme(base: &str) -> String {
+    let b = base.to_string();
+    let lower = b.to_lowercase();
+    let is_local_https = lower.starts_with("https://localhost")
+        || lower.starts_with("https://127.0.0.1")
+        || lower.starts_with("https://[::1]");
+    if is_local_https {
+        if let Some(rest) = b.strip_prefix("https://") {
+            return format!("http://{rest}");
+        }
+        if let Some(rest) = b.strip_prefix("HTTPS://") {
+            return format!("http://{rest}");
+        }
+    }
+    b
+}
+
+/// 无多模态大模型（缺 Key/失败）时的元数据兜底理解。
+fn fallback_understanding(title: &str, style: &str, scenes: &[f64], dur: f64, avg_kb: u64, reason: &str, provider: &str) -> String {
+    format!(
+        "（未能调用已配置的多模态大模型（{provider}），以下基于视频元数据生成概览。原因：{reason}）\n\
+标题：{title}\n风格：{style}\n分析片段时长：约 {dur} 秒\n检测到的场景切换点：{scenes} 个\n平均帧体积：{avg} KB（可作画面复杂度参考）\n\
+说明：已在「设置 → 接口」中配置大模型（{provider}）但本次请求失败。本地 Ollama 等默认使用 http 而非 https，若 Base URL 填了 https://localhost 请改为 http://localhost（例如 http://localhost:11434/v1）；保存后重试即可获得基于关键帧的深度语义理解。",
+        reason = reason,
+        provider = provider,
+        title = title,
+        style = if style.is_empty() { "默认" } else { style },
+        dur = dur as u32,
+        scenes = scenes.len(),
+        avg = avg_kb,
+    )
+}
+
+fn default_narrative(dur: f64) -> String {
+    let seg = dur / 6.0;
+    let names = ["开端", "铺垫", "冲突", "高潮", "反转", "结局"];
+    let mut v: Vec<serde_json::Value> = Vec::new();
+    for (i, n) in names.iter().enumerate() {
+        let s = seg * i as f64;
+        let e = seg * (i + 1) as f64;
+        v.push(serde_json::json!({
+            "section": n,
+            "start": va_fmt_ts(s),
+            "end": va_fmt_ts(e),
+            "summary": format!("{}阶段（自动占位，建议在解说工作台精修）", n)
+        }));
+    }
+    serde_json::to_string_pretty(&v).unwrap_or_else(|_| "[]".into())
+}
+
+fn default_narration_text(title: &str, style: &str) -> String {
+    format!(
+        "这是一段关于《{title}》的{style}解说。影片以紧凑的节奏展开，画面信息丰富，适合用口语化的方式带观众理解核心内容；后续可在解说工作台基于实际理解进一步润色与配音。",
+        title = title,
+        style = if style.is_empty() { "通用" } else { style },
+    )
+}
+
+/// 组装最终 Markdown 报告。
+fn build_analysis_report(
+    title: &str,
+    style: &str,
+    dur: f64,
+    n_frames: usize,
+    scene_cnt: usize,
+    avg_kb: u64,
+    understanding: &str,
+    semantic: &str,
+    narrative_struct: &str,
+    narration_text: &str,
+    segs: &[(f64, f64)],
+) -> String {
+    let mut b = String::new();
+    b.push_str(&format!("# 影片理解报告：{}\n\n", title));
+    b.push_str(&format!(
+        "**风格**：{}  \n**分析片段时长**：约 {} 秒  \n**提取帧数**：{}  \n**场景切换点**：{} 个  \n**平均帧体积**：{} KB\n\n",
+        if style.is_empty() { "默认" } else { style },
+        dur as u32,
+        n_frames,
+        scene_cnt,
+        avg_kb,
+    ));
+    b.push_str("## 一、深度语义理解\n");
+    b.push_str(understanding);
+    b.push_str("\n\n## 二、画面时间节点（语义块划分，供字幕与画面对齐）\n");
+    for (i, (s, e)) in segs.iter().enumerate() {
+        b.push_str(&format!("{}. `{} - {}`\n", i + 1, va_fmt_ts(*s), va_fmt_ts(*e)));
+    }
+    // 机器可解析标记：解说生成阶段据此精确提取真实画面切换点（相对片段秒数）
+    let nodes_raw: String = segs
+        .iter()
+        .map(|(s, e)| format!("{:.2}-{:.2}", s, e))
+        .collect::<Vec<_>>()
+        .join(",");
+    b.push_str(&format!("\n<!--SCENE_NODES:{}-->\n", nodes_raw));
+    b.push_str("\n## 三、语义要点提炼\n");
+    b.push_str(semantic);
+    b.push_str("\n\n## 四、叙事结构（六段式）\n");
+    b.push_str(narrative_struct);
+    b.push_str("\n\n## 五、解说词初稿\n");
+    b.push_str(narration_text);
+    b.push('\n');
+    b
+}
+
+async fn run_film_video_analysis(
+    pool: &SqlitePool,
+    client: &Client,
+    data_dir: &Path,
+    job: &TaskJob,
+    emit: Arc<dyn Fn(ProgressMsg) + Send + Sync>,
+) -> Result<(), String> {
+    let job_id = job.id.clone();
+    let project_id = job.project_id.clone().unwrap_or_default();
+    let video_path = job.payload.get("videoPath").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let start = job.payload.get("start").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let end = job.payload.get("end").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let title = job.payload.get("title").and_then(|v| v.as_str()).unwrap_or("未命名影片").to_string();
+    let style_name = job.payload.get("styleName").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    if video_path.is_empty() {
+        return Err("缺少 videoPath，无法分析视频".into());
+    }
+    let dur_seg = (end - start).max(0.5);
+
+    let ej = job_id.clone();
+    let emitc = emit.clone();
+    let step = move |s: u8, prog: f64, msg: String| {
+        emitc(ProgressMsg {
+            task_id: ej.clone(),
+            progress: prog,
+            status: "running".into(),
+            message: Some(msg),
+            payload: Some(serde_json::json!({ "step": s })),
+        });
+    };
+
+    // ① 提取视频帧
+    let frames_dir = data_dir.join("analysis").join(&job_id);
+    let _ = std::fs::create_dir_all(&frames_dir);
+    let ff = ffmpeg::FfMpeg::ensure(data_dir).await?;
+    let n_frames = ((dur_seg / 4.0).clamp(6.0, 24.0)) as usize;
+    let fps = n_frames as f64 / dur_seg;
+    let pattern = frames_dir.join("frame_%03d.jpg");
+    step(1, 2.0, "提取视频帧 0%".into());
+    let mut child = Command::new(&ff.path)
+        .args([
+            "-ss", &format!("{start:.3}"),
+            "-i", &video_path,
+            "-t", &format!("{dur_seg:.3}"),
+            "-vf", &format!("fps={fps:.4}"),
+            "-q:v", "2",
+            pattern.to_str().unwrap_or("frame_%03d.jpg"),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("启动 ffmpeg 提取帧失败: {e}"))?;
+    loop {
+        let produced = count_frames(&frames_dir);
+        let p = (produced as f64 / n_frames as f64).clamp(0.0, 1.0);
+        step(1, 2.0 + p * 16.0, format!("提取视频帧 {:.0}%", p * 100.0));
+        if produced >= n_frames {
+            break;
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+            break;
+        }
+        sleep(Duration::from_millis(150)).await;
+    }
+    let _ = child.wait();
+    let produced = count_frames(&frames_dir).max(1);
+    step(1, 18.0, format!("提取视频帧完成（{} 帧）", produced));
+
+    // ② 检测场景切换点
+    step(2, 20.0, "检测场景切换点".into());
+    let scene_out = Command::new(&ff.path)
+        .args([
+            "-ss", &format!("{start:.3}"),
+            "-i", &video_path,
+            "-t", &format!("{dur_seg:.3}"),
+            "-filter:v", "select='gt(scene\\,0.3)',showinfo",
+            "-f", "null", "-",
+        ])
+        .output()
+        .map_err(|e| format!("启动 ffmpeg 场景检测失败: {e}"))?;
+    let stderr = String::from_utf8_lossy(&scene_out.stderr);
+    let mut scenes: Vec<f64> = parse_pts_times(&stderr);
+    scenes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    step(2, 32.0, format!("检测场景切换点完成（{} 个）", scenes.len()));
+
+    // ③ 多维度特征编码中
+    let frames = list_frames(&frames_dir);
+    let total = frames.len().max(1);
+    let mut feature_bytes = 0u64;
+    for (i, f) in frames.iter().enumerate() {
+        if let Ok(m) = std::fs::metadata(f) {
+            feature_bytes += m.len();
+        }
+        let p = (i + 1) as f64 / total as f64;
+        step(3, 34.0 + p * 12.0, format!("多维度特征编码中 {:.0}%", p * 100.0));
+    }
+    let avg_kb = ((feature_bytes / total as u64) / 1024) as u64;
+
+    // ④ 深度语义理解中（多模态视觉首次）
+    step(4, 48.0, "深度语义理解中".into());
+    let vision_prompt = "你是资深视频分析专家。以下是影片片段按时间顺序的关键帧（已内联为图片）。请综合描述：\n1) 场景与环境（室内/室外/光线/美术风格）\n2) 人物或主体及其动作\n3) 关键情绪与张力\n4) 整体基调（如悬疑/欢快/温情/史诗）\n请用简体中文分点回答，不超过 300 字。";
+    let sample = base64_frames(&frames, 8);
+    let llm_provider_name = db::get_by_kind(pool, "llm").await.map(|r| r.provider).unwrap_or_else(|_| "大模型".to_string());
+    let understanding = match llm_provider(pool).await {
+        Ok((base_url, model, key)) => match run_llm_vision(client, &base_url, &model, &key, vision_prompt, &sample, &llm_provider_name).await {
+            Ok(t) => t,
+            Err(e) => fallback_understanding(&title, &style_name, &scenes, dur_seg, avg_kb, &e, &llm_provider_name),
+        },
+        Err(e) => fallback_understanding(&title, &style_name, &scenes, dur_seg, avg_kb, &e, &llm_provider_name),
+    };
+    step(4, 58.0, "深度语义理解中".into());
+
+    // ⑤ 语义块解析中
+    let mut boundaries = vec![0.0f64];
+    for s in &scenes {
+        boundaries.push(*s);
+    }
+    boundaries.push(dur_seg);
+    boundaries.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    boundaries.dedup_by(|a, b| (*b - *a).abs() < 0.2);
+    // 语义块时间节点以「片段内相对时间」（0 基）表示，便于后续字幕与画面对齐
+    let mut segs: Vec<(f64, f64)> = Vec::new();
+    for w in boundaries.windows(2) {
+        segs.push((w[0], w[1]));
+    }
+    let n_blocks = segs.len().clamp(4, 48);
+    step(5, 60.0, format!("语义块 1/{} 解析中", n_blocks));
+    for i in 0..n_blocks {
+        let p = (i + 1) as f64 / n_blocks as f64;
+        step(5, 58.0 + p * 10.0, format!("语义块 {}/{} 解析中", i + 1, n_blocks));
+    }
+
+    // ⑥ 深度语义理解中（二次：文本综合）
+    step(6, 70.0, "深度语义理解中".into());
+    let synth_prompt = format!(
+        "基于以下影片理解，提炼 {} 个语义块的核心要点。每个语义块给出「时间区间 + 一句话概括」。\n影片理解：\n{}\n语义块数：{}",
+        n_blocks, understanding, n_blocks
+    );
+    let semantic = match llm_provider(pool).await {
+        Ok((base_url, model, key)) => match run_llm_text(client, &base_url, &model, &key, &synth_prompt).await {
+            Ok(t) => t,
+            Err(_) => understanding.clone(),
+        },
+        Err(_) => understanding.clone(),
+    };
+    step(6, 80.0, "深度语义理解中".into());
+
+    // ⑦ 叙事结构生成中
+    step(7, 81.0, "叙事结构生成中".into());
+    let narrative_struct = match llm_provider(pool).await {
+        Ok((base_url, model, key)) => {
+            let np = format!(
+                "请为以下影片片段设计六段式叙事结构（开端/铺垫/冲突/高潮/反转/结局），每段的「起止时间（相对影片，mm:ss-mm:ss）」需落在本片段时长 {} 秒以内。用简体中文，输出纯 JSON 数组：\n[{{\"section\":\"开端\",\"start\":\"0:00\",\"end\":\"0:30\",\"summary\":\"...\"}}, ...]\n影片理解：\n{}",
+                dur_seg as u32, understanding
+            );
+            match run_llm_text(client, &base_url, &model, &key, &np).await {
+                Ok(t) => t,
+                Err(_) => default_narrative(dur_seg),
+            }
+        }
+        Err(_) => default_narrative(dur_seg),
+    };
+    step(7, 87.0, "叙事结构生成中".into());
+
+    // ⑧ 解说词生成中
+    step(8, 88.0, "解说词生成中".into());
+    let narration_text = match llm_provider(pool).await {
+        Ok((base_url, model, key)) => {
+            let np = format!(
+                "请基于以下影片理解，撰写一段适合配音的解说词初稿（简体中文，口语化，约 200-300 字，不要出现时间轴标记）：\n{}",
+                understanding
+            );
+            match run_llm_text(client, &base_url, &model, &key, &np).await {
+                Ok(t) => t,
+                Err(_) => default_narration_text(&title, &style_name),
+            }
+        }
+        Err(_) => default_narration_text(&title, &style_name),
+    };
+    step(8, 94.0, "解说词生成中".into());
+
+    // ⑨ 输出流水线生成中
+    step(9, 95.0, "输出流水线生成中".into());
+    let report = build_analysis_report(
+        &title,
+        &style_name,
+        dur_seg,
+        produced,
+        scenes.len(),
+        avg_kb,
+        &understanding,
+        &semantic,
+        &narrative_struct,
+        &narration_text,
+        &segs,
+    );
+    db::film_project_set_analysis(pool, &project_id, &report).await?;
+    step(9, 99.0, "输出流水线生成中".into());
+
+    // ⑩ 最终影片分析内容总结报告
+    step(10, 100.0, "最终影片分析内容总结报告".into());
+    emit(ProgressMsg {
+        task_id: job_id.clone(),
+        progress: 100.0,
+        status: "done".into(),
+        message: Some("影片分析完成".into()),
+        payload: Some(serde_json::json!({ "step": 10, "report": report })),
+    });
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn narration_prompt_requires_simplified_and_timestamps() {
+        let cfg = NarrationConfig {
+            title: "测试视频",
+            style: "sarcastic-suspense",
+            style_name: "毒舌悬疑",
+            view: "third",
+            language: "zh",
+            duration_min: 3,
+            hint: "结尾加关注语",
+            model: "god",
+            analysis_mode: 0.3,
+            voice_id: "知性女声",
+            subtitle_style: "经典-白字黑边",
+            asr_text: "这是参考语音",
+            asr_failed: false,
+            analysis: "",
+            scene_nodes: "",
+        };
+        let p = build_narration_prompt(&cfg);
+        assert!(p.contains("简体中文"), "提示词应要求简体中文");
+        assert!(p.contains("时间轴"), "提示词应要求时间轴");
+        assert!(p.contains("毒舌悬疑"), "提示词应包含风格名");
+        assert!(p.contains("第三人称"), "提示词应包含视角");
+        assert!(p.contains("上帝视角"), "god 模型应包含上帝视角");
+        assert!(p.contains("结尾加关注语"), "提示词应包含用户辅助");
+    }
+
+    #[test]
+    fn narration_prompt_aligns_to_scene_nodes_when_provided() {
+        let cfg = NarrationConfig {
+            title: "测试视频",
+            style: "movie",
+            style_name: "",
+            view: "third",
+            language: "zh",
+            duration_min: 1,
+            hint: "",
+            model: "default",
+            analysis_mode: 0.0,
+            voice_id: "",
+            subtitle_style: "",
+            asr_text: "参考",
+            asr_failed: false,
+            analysis: "影片理解……",
+            scene_nodes: "1. 0:00-0:12\n2. 0:12-0:25\n3. 0:25-0:40",
+        };
+        let p = build_narration_prompt(&cfg);
+        assert!(p.contains("画面时间节点"), "有节点时提示词应含画面时间节点块");
+        assert!(p.contains("0:12-0:25"), "提示词应内联真实节点");
+        assert!(p.contains("严格按上方"), "有节点时应要求严格对齐画面切换点");
+        assert!(!p.contains("均匀分布"), "有节点时不应再要求均匀分布");
+    }
+
+    #[test]
+    fn extract_scene_nodes_from_report_marker() {
+        let report = "# 报告\n## 二、画面时间节点\n1. `0:00 - 0:12`\n<!--SCENE_NODES:0.00-12.30,12.30-25.10,25.10-40.00-->\n## 三、其他\n";
+        let nodes = extract_scene_nodes(report);
+        assert_eq!(nodes.len(), 3, "应解析出 3 个节点");
+        assert_eq!(nodes[0], (0.0, 12.30));
+        assert_eq!(nodes[1], (12.30, 25.10));
+        let fmt = format_scene_nodes(&nodes);
+        assert!(fmt.contains("1. 0:00-0:12"), "格式化列表应含首节点，实际: {}", fmt);
+    }
+
+    #[test]
+    fn extract_scene_nodes_fallback_parses_ranges() {
+        let report = "## 语义块\n1. `0:00 - 0:15`\n2. `0:15 - 0:33`\n";
+        let nodes = extract_scene_nodes(report);
+        assert_eq!(nodes.len(), 2, "无标记时应回退解析 m:ss - m:ss");
+        assert_eq!(nodes[0], (0.0, 15.0));
+        assert_eq!(nodes[1], (15.0, 33.0));
+    }
+
+    #[test]
+    fn narration_parse_embeds_timestamp_in_text() {
+        let json = r#"[{"start":"0:00","end":"0:30","dialogue":"开场白","section":"开端"},{"start":"0:30","end":"1:00","dialogue":"第二段","section":"铺垫"}]"#;
+        let shots = parse_narration_response(json, 60.0, "movie").unwrap();
+        assert_eq!(shots.len(), 2);
+        assert!(
+            shots[0].text.starts_with("[开端] 0:00-0:30"),
+            "文案应带时间轴，实际: {}",
+            shots[0].text
+        );
+        assert_eq!(shots[0].label, "开端");
+        assert_eq!(shots[0].timeline_start, 0.0);
+        assert_eq!(shots[0].timeline_end, 30.0);
+        assert_eq!(shots[1].timeline_end, 60.0);
+    }
 }

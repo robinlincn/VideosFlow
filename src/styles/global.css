@@ -1898,6 +1898,46 @@ input[type="range"]::-webkit-slider-thumb {
   padding: 16px 24px; border-top: 1px solid #e6dfd1; display: flex; justify-content: space-between;
   background: #faf3e8;
 }
+
+/* ===== M2.6：影片视频分析弹窗 ===== */
+.video-analysis-modal { max-width: 600px; }
+.va-overall { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+.va-overall__bar { flex: 1; height: 10px; border-radius: 999px; background: #efe6d6; overflow: hidden; }
+.va-overall__fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #b85c38, #d98b53); transition: width 0.25s ease; }
+.va-overall__fill.is-failed { background: linear-gradient(90deg, #c0392b, #e07a5f); }
+.va-overall__pct { font-size: 13px; font-weight: 700; color: #2d1810; min-width: 38px; text-align: right; }
+.va-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.va-step {
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 10px;
+  background: #fff; border: 1px solid #efe6d6; font-size: 13px; color: #9a9082;
+}
+.va-step__icon {
+  width: 24px; height: 24px; flex: none; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; background: #f0e8d8; color: #9a9082;
+}
+.va-step__label { flex: 1; }
+.va-step__detail { font-size: 12px; color: #b85c38; font-weight: 600; margin-left: auto; }
+.va-step.is-active { border-color: #b85c38; background: #fff7ef; color: #2d1810; box-shadow: 0 0 0 3px rgba(184,92,56,0.12); }
+.va-step.is-active .va-step__icon { background: #2d1810; color: #fffaf2; }
+.va-step.is-done { color: #4a5a32; border-color: #cfe0b8; background: #f6f8ef; }
+.va-step.is-done .va-step__icon { background: #6b7a4b; color: #fff; }
+.va-step.is-failed { color: #c0392b; border-color: #f0c4ba; background: #fdf1ee; }
+.va-step.is-failed .va-step__icon { background: #c0392b; color: #fff; }
+.va-step__spinner {
+  width: 14px; height: 14px; flex: none; border-radius: 50%;
+  border: 2px solid #e6c9b5; border-top-color: #b85c38; animation: va-spin 0.8s linear infinite;
+}
+@keyframes va-spin { to { transform: rotate(360deg); } }
+.va-fail { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: #fdf1ee; color: #c0392b; font-size: 13px; }
+.va-report { margin-top: 16px; border: 1px solid #e6dfd1; border-radius: 12px; overflow: hidden; background: #fffaf2; }
+.va-report__head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: #f3e8d6; font-weight: 600; color: #2d1810; font-size: 13px; }
+.va-report__body {
+  margin: 0; padding: 14px; max-height: 280px; overflow-y: auto; font-size: 12.5px; line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word; color: #3a2a1d; background: #fffdf8;
+}
+.film-step5__analysis { margin: 4px 0 18px; border: 1px solid #e6dfd1; border-radius: 12px; overflow: hidden; background: #fffaf2; }
+.film-step5__analysis > summary { cursor: pointer; padding: 12px 14px; background: #f3e8d6; font-weight: 600; color: #2d1810; font-size: 13px; }
+.film-step5__analysis-body { margin: 0; padding: 14px; max-height: 320px; overflow-y: auto; font-size: 12.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; color: #3a2a1d; background: #fffdf8; }
 .narrative-step-content { display: flex; flex-direction: column; gap: 14px; }
 .narrative-step-title { font-size: 18px; font-weight: 700; font-family: 'Fraunces', serif; color: #2d1810; }
 .narrative-step-desc { font-size: 13px; color: #6b6359; }
@@ -2224,11 +2264,33 @@ input[type="range"]::-webkit-slider-thumb {
   border: 1px solid var(--accent-l);
 }
 .film-step5__script {
-  white-space: pre-wrap; word-break: break-word; line-height: 1.75;
+  display: flex; flex-direction: column; gap: 10px;
   font-size: 14px; color: var(--ink-2);
-  max-height: 340px; overflow-y: auto; padding: 14px;
+  max-height: 420px; overflow-y: auto; padding: 14px;
   background: var(--paper-2); border-radius: var(--radius-md);
   border: 1px solid var(--line-2);
+}
+/* 单条解说分段卡片 */
+.film-step5__seg {
+  padding: 12px 14px; border-radius: var(--radius-md);
+  background: var(--card); border: 1px solid var(--line-2);
+  transition: border-color .15s, box-shadow .15s;
+}
+.film-step5__seg:hover { border-color: var(--accent-l); box-shadow: var(--shadow-sm); }
+.film-step5__seg-head {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+}
+.film-step5__seg-tag {
+  font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: var(--radius-sm);
+  background: var(--accent-soft); color: var(--accent-d);
+  border: 1px solid var(--accent-l); white-space: nowrap;
+}
+.film-step5__seg-time {
+  font-size: 12px; font-family: var(--font-mono); padding: 1px 8px; border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--muted); white-space: nowrap;
+}
+.film-step5__seg-body {
+  line-height: 1.75; word-break: break-word;
 }
 .film-step5__result-actions { display: flex; gap: 10px; margin-top: 14px; }
 .film-step5__warn {
