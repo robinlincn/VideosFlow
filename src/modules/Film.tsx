@@ -164,6 +164,8 @@ export default function Film() {
       );
     } else {
       // 分镜工作台（步骤 6）
+      // 把 videoPath 暴露到 window，Step6 内部剪映草稿导出读这里（避免改旧版 Props 接口）
+      (window as any).__vf_videoPath = draft.videoPath;
       body = (
         <Step6DubAndCut
           script={draft.script}
@@ -181,6 +183,7 @@ export default function Film() {
   }
   // 步骤 6
   else if (step === 6) {
+      (window as any).__vf_videoPath = draft.videoPath;
       body = (
         <Step6DubAndCut
           script={draft.script}

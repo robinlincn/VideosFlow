@@ -21,6 +21,10 @@ import type {
   Shot,
   Storyboard,
   GeneratedAsset,
+  VoiceOption,
+  DubSegment,
+  TranslateRequest,
+  JianyingDraftOptions,
 } from './types';
 
 export type {
@@ -44,6 +48,10 @@ export type {
   Shot,
   Storyboard,
   GeneratedAsset,
+  VoiceOption,
+  DubSegment,
+  TranslateRequest,
+  JianyingDraftOptions,
 } from './types';
 
 /** 读取全部 Provider 配置（含 hasKey 标记）。 */
@@ -554,4 +562,163 @@ export async function getFilmAnalysis(projectId: string): Promise<string | null>
   } catch {
     return null;
   }
+}
+
+// ===========================================================================
+// 分镜工作台：音色库 / 批量配音 / 翻译 / 剪映草稿
+// ===========================================================================
+
+/** 拉取可用音色列表（默认 XiaomiMimo /audio/voices；失败时回退候选由前端 fallback）。 */
+export async function listVoices(): Promise<VoiceOption[]> {
+  try {
+    const r = await invoke<VoiceOption[]>('voice_list');
+    return Array.isArray(r) ? r : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 批量配音（按段调用 XiaomiMimo /audio/speech，每段一个 .wav 文件）。经 Channel 推送进度。
+ *  ★ Channel 在前端必须持续持有引用直到任务完成——通过模块级 _taskChans 缓存防 GC。
+ */
+export async function batchDub(
+  projectId: string,
+  segments: DubSegment[],
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  const taskId = await invoke<string>('batch_dub', {
+    projectId,
+    segments: JSON.stringify(segments),
+    onProgress: ch,
+  });
+  // ★ 保存 channel 引用到模块级缓存，避免 invoke 返回后被 GC（否则后续进度消息全部丢失）
+  holdTaskChannel(taskId, ch);
+  return taskId;
+}
+
+/** 模块级 channel 缓存：所有走任务队列的 IPC（batch_dub / export_*）都需要在前端持有 channel 引用，
+ *  否则 invoke 返回后 ch 被 GC，consumer 后续 send 的进度消息全部丢失。
+ */
+const _taskChans = new Map<string, ReturnType<typeof createChannel>>();
+/** 把 taskId 和 channel 注册到模块缓存（防止被 GC）。调用方必须在任务结束后 release。 */
+export function holdTaskChannel(taskId: string, ch: ReturnType<typeof createChannel>) {
+  if (taskId) _taskChans.set(taskId, ch);
+}
+/** 任务完成（成功/失败/超时）后由调用方释放 channel 引用 */
+export function releaseTaskChannel(taskId: string) {
+  _taskChans.delete(taskId);
+}
+
+/** 翻译整段解说文案到目标语言；返回按 index 对齐的 segments。 */
+export async function translateScript(
+  projectId: string,
+  req: TranslateRequest,
+): Promise<{ index: number; text: string }[]> {
+  try {
+    const r = await invoke<{ index: number; text: string }[] | string>('translate_script', {
+      projectId,
+      language: req.language,
+      segments: JSON.stringify(req.segments),
+    });
+    if (Array.isArray(r)) return r;
+    if (typeof r === 'string') { try { return JSON.parse(r); } catch { return []; } }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+/** 导出剪映草稿（JianyingPro/Drafts/<project>_<ts>/）。★ Channel 引用防 GC */
+export async function exportJianyingDraft(
+  projectId: string,
+  opts: JianyingDraftOptions,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  const taskId = await invoke<string>('film_jianying_draft', {
+    projectId,
+    script: opts.script,
+    videoPath: opts.videoPath,
+    rangeStart: opts.rangeStart,
+    rangeEnd: opts.rangeEnd,
+    onProgress: ch,
+  });
+  holdTaskChannel(taskId, ch);
+  return taskId;
+}
+
+/** 单段配音：复用 batch_dub 后端，单元素数组，每段一条 wav。★ Channel 引用防 GC */
+export async function dubOneSegment(
+  projectId: string,
+  segment: DubSegment,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  const taskId = await invoke<string>('batch_dub', {
+    projectId,
+    segments: JSON.stringify([segment]),
+    onProgress: ch,
+  });
+  holdTaskChannel(taskId, ch);
+  return taskId;
+}
+
+/** 导入 .srt 字幕：解析为 [{start, end, text}] 数组。 */
+export async function importSrt(filePath: string): Promise<{ start: number; end: number; text: string }[]> {
+  try {
+    const r = await invoke<{ segments: { start: number; end: number; text: string }[] } | { start: number; end: number; text: string }[] | string>('import_script', { filePath });
+    if (typeof r === 'string') { try { return JSON.parse(r); } catch { return []; } }
+    if (Array.isArray(r)) return r as any;
+    if (r && Array.isArray((r as any).segments)) return (r as any).segments;
+    return [];
+  } catch (e: any) {
+    throw new Error(e?.message || String(e));
+  }
+}
+
+/** 导入配音：用本地 faster-whisper 转写 wav/mp3，按段时长分配。返回 {segments: [{start,end,text}]}。 */
+export async function importAudioDub(projectId: string, filePath: string): Promise<{ segments: { start: number; end: number; text: string }[] }> {
+  const ch = createChannel(() => undefined);
+  const r = await invoke<{ segments?: any[] } | string>('import_audio_dub', { projectId, filePath, onProgress: ch });
+  if (typeof r === 'string') { try { return JSON.parse(r); } catch { return { segments: [] }; } }
+  return (r as any) || { segments: [] };
+}
+
+/** 导出 Premiere：生成 .edl + 时间线 JSON + 字幕 SRT 三件套到 data_dir/premier_drafts/<project>_<ts>/。★ Channel 引用防 GC */
+export async function exportPremiere(
+  projectId: string,
+  opts: { script: string; videoPath: string; rangeStart: number; rangeEnd: number; followOriginal?: boolean; flowerText?: boolean; strictAlign?: boolean },
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  const taskId = await invoke<string>('film_premiere_export', {
+    projectId, script: opts.script, videoPath: opts.videoPath,
+    rangeStart: opts.rangeStart, rangeEnd: opts.rangeEnd,
+    followOriginal: opts.followOriginal || false,
+    flowerText: opts.flowerText || false,
+    strictAlign: opts.strictAlign || false,
+    onProgress: ch,
+  });
+  holdTaskChannel(taskId, ch);
+  return taskId;
+}
+
+/** 导出国际剪映（CapCut）：同结构 + 绝对路径引用 + 国际化字段。★ Channel 引用防 GC */
+export async function exportJianyingDraftIntl(
+  projectId: string,
+  opts: JianyingDraftOptions & { followOriginal?: boolean; flowerText?: boolean; strictAlign?: boolean },
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  const taskId = await invoke<string>('film_jianying_draft_intl', {
+    projectId, script: opts.script, videoPath: opts.videoPath,
+    rangeStart: opts.rangeStart, rangeEnd: opts.rangeEnd,
+    followOriginal: opts.followOriginal || false,
+    flowerText: opts.flowerText || false,
+    strictAlign: opts.strictAlign || false,
+    onProgress: ch,
+  });
+  holdTaskChannel(taskId, ch);
+  return taskId;
 }

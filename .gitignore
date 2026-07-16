@@ -48,3 +48,6 @@ docs/FlowImg/*.rar
 
 # 本地大模型权重（GB 级，下载到项目内 models/，不入库）
 models/
+
+# Tauri 运行时数据目录（抽音轨 wav、转写产物、临时缓存）
+src-tauri/data/

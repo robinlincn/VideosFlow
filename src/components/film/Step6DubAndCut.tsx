@@ -1,10 +1,12 @@
 // 步骤 6：视频配音剪辑 = 分镜工作台（剪辑脚本表 + 工具栏 + 视频预览 + 导出）
 // v2.0 重构：替代 v1.0 的 StoryboardWorkbench。分镜可编辑/删除/排序并持久化回草稿。
+// v2.1 增量：把 voice / batch_dub / translate 三个按钮接到真实后端（音色库、批量配音、翻译至）；其余保留 M5 占位。
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../state/AppContext';
-import { submitFilmExport } from '../../ipc/providers';
-import type { ProgressMsg } from '../../ipc/types';
+import { listVoices, batchDub, translateScript, exportJianyingDraft, dubOneSegment, importSrt, importAudioDub, exportPremiere, exportJianyingDraftIntl, releaseTaskChannel } from '../../ipc/providers';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import type { ProgressMsg, VoiceOption, DubSegment } from '../../ipc/types';
 
 interface Props {
   script: string;
@@ -86,6 +88,16 @@ function segsToScript(segs: Segment[]): string {
   return segs.map((s) => `[${s.section}] ${fmtShort(s.start)}-${fmtShort(s.end)} ${s.text}`).join('\n');
 }
 
+/** 计算两段文本的字符级重叠率（0-1，基于去标点字符集合 Jaccard 近似）。 */
+function headOverlap(a: string, b: string): number {
+  if (!a || !b) return 0;
+  const A = new Set(a.replace(/\s+/g, ''));
+  const B = new Set(b.replace(/\s+/g, ''));
+  let same = 0;
+  for (const ch of A) if (B.has(ch)) same++;
+  return same / Math.max(A.size, 1);
+}
+
 const TOOLBAR = [
   { id: 'voice',      icon: '🎵', label: '音色库',     primary: false },
   { id: 'batch_dub',  icon: '🎬', label: '批量配音',   primary: true  },
@@ -112,12 +124,87 @@ export default function Step6DubAndCut({
   const [subtitleStyle, setSubtitleStyle] = useState('经典-白字黑边');
   const [exportBusy, setExportBusy] = useState(false);
   const [exportMsg, setExportMsg] = useState('');
+  // 全局选项（影响 dedup / qa / 导出）
+  const [followOriginal, setFollowOriginal] = useState(false);
+  const [flowerText, setFlowerText] = useState(false);
+  const [strictAlign, setStrictAlign] = useState(false);
+  // 历史版本（内存快照，简单持久化于 localStorage）
+  const [snapshots, setSnapshots] = useState<{ id: string; ts: number; segs: Segment[]; note: string }[]>([]);
+  // 最近一次去重/质检结果
+  const [qaIssues, setQaIssues] = useState<string[]>([]);
+  const lastSnapshotRef = useRef<string>('');
 
   // 从解说工作台带入新脚本时重新解析
   useEffect(() => {
     setSegs(parseScript(script, totalDuration, rangeStart));
     setEditingIdx(null);
   }, [script, totalDuration, rangeStart]);
+
+  // 历史快照：从 localStorage 加载
+  useEffect(() => {
+    if (!projectId) return;
+    try {
+      const raw = localStorage.getItem(`vfStep6History.${projectId}`);
+      if (raw) setSnapshots(JSON.parse(raw));
+    } catch { /* ignore */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
+  // 写入快照（最多 8 条 + 持久化 localStorage）
+  const saveSnapshot = (note: string) => {
+    const id = Math.random().toString(36).slice(2, 9);
+    const ts = Date.now();
+    const snap = { id, ts, segs: segs.map((s) => ({ ...s })), note };
+    setSnapshots((prev) => {
+      const next = [snap, ...prev].slice(0, 8);
+      try {
+        if (projectId) localStorage.setItem(`vfStep6History.${projectId}`, JSON.stringify(next));
+      } catch { /* quota/ignore */ }
+      return next;
+    });
+  };
+
+  // 单段配音：与 batch_dub 共用同一 Rust 后端，单元素数组传入即可
+  const dubOne = (idx: number) => {
+    const target = segs[idx];
+    if (!target) return;
+    if (!projectId) { actions.task('缺少工程 ID', 100); return; }
+    setExportBusy(true); setExportMsg(`单段配音 #${idx + 1}`);
+    const item: DubSegment = { index: idx, text: target.text, voice: target.role };
+    dubOneSegment(projectId, item, (m: ProgressMsg) => {
+      setExportMsg(m.message || '');
+      if (m.status === 'done') {
+        setExportBusy(false);
+        const url = (m.payload as any)?.url || '';
+        // 把生成的 URL 写回 seg 的临时字段（不持久化到 script）
+        setSegs((prev) => prev.map((s, i) => i === idx ? { ...s, ...(url ? { dubUrl: url } : {}) } : s));
+        actions.task(`第 ${idx + 1} 段配音完成${url ? '：' + url : ''}`, 100);
+        try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
+      } else if (m.status === 'failed') {
+        setExportBusy(false);
+        actions.task(`第 ${idx + 1} 段配音失败：${m.message || ''}`, 100);
+        try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
+      }
+    }).catch((e) => { setExportBusy(false); actions.task('单段配音失败：' + String(e), 100); });
+  };
+
+  // 复制分镜：插入到当前段的下一位（区间时间与原段一致，文本复用）
+  const copySegment = (idx: number) => {
+    const target = segs[idx];
+    if (!target) return;
+    const insertAt = idx + 1;
+    const next = [...segs];
+    next.splice(insertAt, 0, {
+      ...target,
+      index: insertAt,
+      // 时间：原段 [start, end] 后推到下一段，但为了不重叠，先按等长延后
+      start: target.end,
+      end: target.end + Math.max(1, target.end - target.start),
+    });
+    persist(next.map((s, i) => ({ ...s, index: i })));
+    saveSnapshot(`复制 #${idx + 1}`);
+    actions.task(`已复制分镜 #${idx + 1}，插入到 #${insertAt + 1}`, 100);
+  };
 
   const persist = (next: Segment[]) => {
     setSegs(next);
@@ -160,24 +247,25 @@ export default function Step6DubAndCut({
     setExportBusy(true);
     setExportMsg('准备导出');
     try {
-      await submitFilmExport(projectId || 'local', {
-        hw: false,
-        resolution: '1080p',
-        burnSub: true,
-        mixVoice: false,
-        voiceMix: 1,
+      // 真实剪映草稿导出：写入 data_dir/jianying_drafts/<project>_<ts>/draft_content.json 等
+      await exportJianyingDraft(projectId || 'local', {
         script: segsToScript(segs),
+        videoPath: (window as any).__vf_videoPath || '',
+        rangeStart,
+        rangeEnd,
       }, (m: ProgressMsg) => {
         setExportMsg(m.message || '');
         if (m.status === 'done') {
           setExportBusy(false);
-          const out = (m.payload as any)?.outPath || '';
-          actions.task('剪映草稿已导出：' + out, 100);
+          const out = (m.payload as any)?.draftDir || '';
+          actions.task('剪映草稿已生成：' + out, 100);
           setExportMsg('导出完成：' + out);
+          try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
         } else if (m.status === 'failed') {
           setExportBusy(false);
           actions.task('导出失败：' + (m.message || ''), 100);
           setExportMsg('导出失败');
+          try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
         }
       });
     } catch (e) {
@@ -186,6 +274,61 @@ export default function Step6DubAndCut({
       setExportMsg('导出失败');
     }
   };
+
+  // 导出 Premiere：生成 .edl（CMX3600）+ 时间线 JSON + 字幕 SRT，三件套打包到一个 zip-like 文本
+  const exportPremiereClick = () => {
+    if (!projectId) { actions.task('缺少工程 ID', 100); return; }
+    if (segs.length === 0) { actions.task('暂无分镜', 100); return; }
+    setExportBusy(true); setExportMsg('导出 Premiere');
+    exportPremiere(projectId, {
+      script: segsToScript(segs),
+      videoPath: (window as any).__vf_videoPath || '',
+      rangeStart, rangeEnd,
+      followOriginal, flowerText, strictAlign,
+    }, (m: ProgressMsg) => {
+      setExportMsg(m.message || '');
+      if (m.status === 'done') {
+        setExportBusy(false);
+        const out = (m.payload as any)?.outDir || (m.payload as any)?.outPath || '';
+        actions.task('Premiere 时间线已导出：' + out, 100);
+        setExportMsg('导出完成：' + out);
+        try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
+      } else if (m.status === 'failed') {
+        setExportBusy(false);
+        actions.task('Premiere 导出失败：' + (m.message || ''), 100);
+        setExportMsg('导出失败');
+        try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
+      }
+    }).catch((e) => { setExportBusy(false); actions.task('Premiere 导出失败：' + String(e), 100); });
+  };
+
+  // 导出国际剪映（CapCut / Jianying International）：与国内版结构相同，路径用绝对路径
+  const exportJianyingIntlClick = () => {
+    if (!projectId) { actions.task('缺少工程 ID', 100); return; }
+    if (segs.length === 0) { actions.task('暂无分镜', 100); return; }
+    setExportBusy(true); setExportMsg('导出国际剪映');
+    exportJianyingDraftIntl(projectId, {
+      script: segsToScript(segs),
+      videoPath: (window as any).__vf_videoPath || '',
+      rangeStart, rangeEnd,
+      followOriginal, flowerText, strictAlign,
+    }, (m: ProgressMsg) => {
+      setExportMsg(m.message || '');
+      if (m.status === 'done') {
+        setExportBusy(false);
+        const out = (m.payload as any)?.draftDir || '';
+        actions.task('国际剪映草稿已生成：' + out, 100);
+        setExportMsg('导出完成：' + out);
+        try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
+      } else if (m.status === 'failed') {
+        setExportBusy(false);
+        actions.task('国际剪映导出失败：' + (m.message || ''), 100);
+        setExportMsg('导出失败');
+        try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
+      }
+    }).catch((e) => { setExportBusy(false); actions.task('国际剪映导出失败：' + String(e), 100); });
+  };
+
   const onTool = (id: string) => {
     switch (id) {
       case 'export_srt':
@@ -206,6 +349,299 @@ export default function Step6DubAndCut({
         }
         break;
       }
+      // ===== 开始翻译（顶部按钮）=====
+      case 'do_trans': {
+        // 先弹出 prompt 选语种；选完后复用 translateScript 真后端
+        const input = window.prompt('翻译至（输入 1=中文, 2=English, 3=日本語）：', '2');
+        const map: Record<string, 'zh' | 'en' | 'ja'> = { '1': 'zh', '2': 'en', '3': 'ja', zh: 'zh', en: 'en', ja: 'ja' };
+        const picked = map[(input || '').toLowerCase()] || map[input || ''];
+        if (!picked) { actions.task('已取消翻译', 100); break; }
+        if (segs.length === 0) { actions.task('暂无分镜可翻译', 100); break; }
+        if (!projectId) { actions.task('缺少工程 ID', 100); break; }
+        setExportBusy(true); setExportMsg('翻译中');
+        translateScript(projectId, {
+          language: picked,
+          segments: segs.map(s => ({ index: s.index, section: s.section, start: s.start, end: s.end, text: s.text })),
+        }).then((out) => {
+          setExportBusy(false);
+          if (out && out.length > 0) {
+            const next = segs.map(s => ({ ...s, text: (out.find((x: any) => x.index === s.index) || {}).text || s.text }));
+            persist(next);
+            // 落盘到 localStorage 历史
+            saveSnapshot(picked.toUpperCase() + ' 翻译');
+            actions.task(`翻译完成（${picked.toUpperCase()}）· ${out.length} 段`, 100);
+          } else {
+            actions.task('翻译结果为空', 100);
+          }
+        }).catch((e) => { setExportBusy(false); actions.task('翻译失败：' + String(e), 100); });
+        break;
+      }
+      // ===== 历史版本（内存快照）=====
+      case 'history': {
+        const note = window.prompt('为当前分镜输入备注（取消请直接关闭）：') || '';
+        if (note === null) { actions.task('已取消保存', 100); break; }
+        saveSnapshot(note || '无备注');
+        actions.task('快照已保存（共 ' + (snapshots.length + 1) + ' 个）', 100);
+        // 立即弹列表让用户选择回滚/查看
+        const list = snapshots.map((s, i) => `${i + 1}. [${new Date(s.ts).toLocaleString()}] ${s.note}（${s.segs.length} 段）`).join('\n');
+        const pick = window.prompt('当前快照清单（输入序号回滚到该版本）：\n' + list + '\n\n0 = 仅查看不处理');
+        const idx = parseInt(pick || '-1');
+        if (!isNaN(idx) && idx >= 1 && idx <= snapshots.length) {
+          const sel = snapshots[idx - 1];
+          persist(sel.segs.map((s, i) => ({ ...s, index: i })));
+          actions.task(`已回滚到快照 ${idx}`, 100);
+        } else {
+          actions.task('快照列表已保存', 100);
+        }
+        break;
+      }
+      // ===== 角色替换 =======
+      case 'role_swap': {
+        // 自动按"主角"/"旁白"/"受访者"/"画外音"做简单分类
+        if (segs.length === 0) { actions.task('暂无分镜', 100); break; }
+        const HEAD = ['话说', '只见', '原来', '于是', '镜头', '画面', '随后'];
+        const NARR = ['这时', '此刻', '与此同时', '据', '根据', '据悉'];
+        let changed = 0;
+        const next = segs.map((s) => {
+          const first = s.text.slice(0, 2);
+          const old = s.role;
+          let role = '主角';
+          if (NARR.some((n) => s.text.startsWith(n))) role = '旁白';
+          else if (HEAD.some((h) => s.text.startsWith(h))) role = '主角';
+          if (role !== old) changed++;
+          return { ...s, role };
+        });
+        if (changed === 0) { actions.task('未检测到需要切换的角色段', 100); break; }
+        persist(next);
+        saveSnapshot('角色重命名');
+        actions.task(`已切换 ${changed}/${segs.length} 段角色`, 100);
+        break;
+      }
+      // ===== 导入字幕（SRT/JSON）======
+      case 'import_sub': {
+        openDialog({
+          filters: [{ name: '字幕', extensions: ['srt', 'json', 'txt'] }],
+          multiple: false,
+        }).then(async (p) => {
+          if (!p || typeof p !== 'string') { actions.task('已取消导入', 100); return; }
+          try {
+            const subs = await importSrt(p);
+            if (!subs || subs.length === 0) { actions.task('未解析出字幕段', 100); return; }
+            // 用导入字幕回填 segs.text 与 start/end
+            const next: Segment[] = subs.map((s, i) => ({
+              index: i, section: segs[i]?.section || '导入字幕',
+              start: s.start, end: s.end, text: s.text, role: segs[i]?.role || '主角',
+            }));
+            persist(next);
+            saveSnapshot('字幕导入');
+            actions.task(`已导入 ${subs.length} 段字幕`, 100);
+          } catch (e: any) { actions.task('导入字幕失败：' + (e.message || String(e)), 100); }
+        }).catch(() => actions.task('已取消导入', 100));
+        break;
+      }
+      // ===== 导入配音（wav/mp3，整体转写按段时长切）======
+      case 'import_dub': {
+        if (!projectId) { actions.task('缺少工程 ID', 100); break; }
+        openDialog({
+          filters: [{ name: '音频', extensions: ['wav', 'mp3', 'm4a', 'flac'] }],
+          multiple: false,
+        }).then(async (p) => {
+          if (!p || typeof p !== 'string') { actions.task('已取消导入', 100); return; }
+          setExportBusy(true); setExportMsg('导入配音转写中');
+          try {
+            // 用本地 faster-whisper 转写整体音频
+            const res = await importAudioDub(projectId, p);
+            setExportBusy(false);
+            if (!res || !res.segments || res.segments.length === 0) {
+              actions.task('未转写出文本（可能音频无清晰人声）', 100); return;
+            }
+            // 用转写 segments 回填 text（保留现有的时间区间，仅替换文字）
+            const next = segs.map((s, i) => {
+              const r = res.segments[i] || res.segments[Math.min(i, res.segments.length - 1)];
+              return r ? { ...s, text: r.text } : s;
+            });
+            persist(next);
+            saveSnapshot('配音导入');
+            actions.task(`已导入 ${res.segments.length} 段配音文案`, 100);
+          } catch (e: any) {
+            setExportBusy(false);
+            actions.task('配音导入失败：' + (e.message || String(e)), 100);
+          }
+        }).catch(() => actions.task('已取消导入', 100));
+        break;
+      }
+      // ===== 智能去重（相邻段落相似合并）======
+      case 'dedup': {
+        if (segs.length < 2) { actions.task('段落不足，跳过去重', 100); break; }
+        const issues: { i: number; reason: string }[] = [];
+        // 简单规则：
+        //   (a) 相邻段开头 6 字相同 → 合并
+        //   (b) 单段 < 8 字且下一段 > 16 字 → 合并到下一段
+        //   (c) 严格模式下：连续重复词 ≥ 3 字 且 > 30% 重叠 → 合并
+        const next: Segment[] = [];
+        for (let i = 0; i < segs.length; i++) {
+          const cur = segs[i];
+          const prev = next[next.length - 1];
+          const head4 = cur.text.slice(0, 4);
+          const prevHead4 = prev?.text.slice(0, 4) || '';
+          const overlap = prev ? headOverlap(prev.text, cur.text) : 0;
+          const isDupHead = prev && head4 === prevHead4 && head4.length >= 3;
+          const isShort = prev && cur.text.length < 8;
+          const isHighOverlap = strictAlign && prev && overlap > 0.4 && prev.text.length > 12;
+          if (prev && (isDupHead || isShort || isHighOverlap)) {
+            const reason = isDupHead ? '相邻段开头' + Math.min(4, head4.length) + ' 字相同'
+              : isShort ? '单段过短（<' + cur.text.length + ' 字）'
+              : '相邻段文本重叠 >40%';
+            issues.push({ i: cur.index, reason });
+            // 合并：把 cur 的正文并入 prev，调整 end
+            const merged: Segment = { ...prev, end: cur.end, text: (prev.text.trim() + cur.text.trim()).slice(0, 220) };
+            next[next.length - 1] = merged;
+          } else {
+            next.push(cur);
+          }
+        }
+        const dedupCount = segs.length - next.length;
+        if (dedupCount === 0) {
+          actions.task('未发现可去重段', 100);
+        } else {
+          persist(next.map((s, i) => ({ ...s, index: i })));
+          saveSnapshot('智能去重');
+          actions.task(`已合并 ${dedupCount} 段（${issues.map(x => x.reason).slice(0, 3).join('；')}${issues.length > 3 ? '…' : ''}）`, 100);
+        }
+        break;
+      }
+      // ===== 文案质检（本地规则）======
+      case 'qa': {
+        if (segs.length === 0) { actions.task('暂无分镜', 100); break; }
+        const issues: string[] = [];
+        for (let i = 0; i < segs.length; i++) {
+          const s = segs[i];
+          if (!s.text || s.text.trim().length === 0) {
+            issues.push(`#${i + 1}（${s.section}）：空段`);
+          } else if (s.text.length > 90) {
+            issues.push(`#${i + 1}（${s.section}）：过长（${s.text.length} 字，建议 < 90）`);
+          } else if (s.text.length < 5) {
+            issues.push(`#${i + 1}（${s.section}）：过短（${s.text.length} 字，建议 ≥ 5）`);
+          }
+          // 时间区间重叠 / 倒序
+          if (i > 0 && s.start < segs[i - 1].end) {
+            issues.push(`#${i + 1}：与上一段时间重叠（${s.start} < ${segs[i - 1].end}）`);
+          }
+          // 同段重复字（"的的""啊啊"）
+          if (/(.)\1{3,}/.test(s.text)) issues.push(`#${i + 1}：含连续重复字符`);
+        }
+        // 严格对齐：长度差异过大
+        if (strictAlign) {
+          const lens = segs.map((s) => s.text.length);
+          const avg = lens.reduce((a, b) => a + b, 0) / Math.max(1, lens.length);
+          for (let i = 0; i < segs.length; i++) {
+            if (lens[i] < avg * 0.4) issues.push(`#${i + 1}：长度异常短（小均 60%）`);
+            if (lens[i] > avg * 1.8) issues.push(`#${i + 1}：长度异常长（大均 80%）`);
+          }
+        }
+        setQaIssues(issues);
+        if (issues.length === 0) {
+          actions.task('质检通过：无问题', 100);
+        } else {
+          actions.task(`质检完成：发现 ${issues.length} 项（首 3 条：${issues.slice(0, 3).join('；')}）`, 100);
+          // 把所有问题放在 alert 里给用户看清
+          window.alert('文案质检结果\n' + issues.slice(0, 50).map((s, i) => `${i + 1}. ${s}`).join('\n') + (issues.length > 50 ? `\n…还有 ${issues.length - 50} 条` : ''));
+        }
+        break;
+      }
+      case 'voice':
+        // 音色库：异步拉取 XiaomiMimo 音色列表（M5 接通的真实后端）
+        // 用 alert/prompt 显示完整列表（保持界面不变，不引入新 UI 元素）
+        listVoices().then((list: VoiceOption[]) => {
+          const fallback: VoiceOption[] = [
+            { id: 'default', name: '默认（系统音色）' },
+            { id: 'male_calm', name: '磁性男声 · 沉稳' },
+            { id: 'male_warm', name: '温暖男声 · 亲切' },
+            { id: 'female_lively', name: '知性女声 · 活力' },
+            { id: 'female_news', name: '标准女声 · 新闻' },
+            { id: 'narrator', name: '旁白男声 · 纪录片' },
+          ];
+          const pool = list.length > 0 ? list : fallback;
+          const lines = pool.map((v, i) => `${i + 1}. ${v.name} (${v.id})`).join('\n');
+          alert(`音色库（共 ${pool.length} 项）：\n\n${lines}\n\n点确定后输入编号选择音色，作用于全部分镜。`);
+          const pick = window.prompt('输入音色编号选择（1-' + pool.length + '）：', '1');
+          if (!pick) return;
+          const idx = parseInt(pick, 10);
+          const picked = pool[idx - 1];
+          if (!picked) { actions.task('音色选择无效', 100); return; }
+          const next = segs.map(s => ({ ...s, role: picked.id }));
+          setSegs(next);
+          persist(next);
+          actions.task(`音色已设为：${picked.name}`, 100);
+        }).catch((e) => actions.task('音色库加载失败：' + String(e), 100));
+        break;
+      case 'batch_dub':
+        // 批量配音：逐段调 XiaomiMimo TTS，写 data_dir/dub/<project>/seg_NNN.wav
+        if (segs.length === 0) { actions.task('暂无分镜可配音', 100); break; }
+        if (!projectId) { actions.task('缺少工程 ID', 100); break; }
+        setExportBusy(true);
+        setExportMsg('批量配音中');
+        const dubItems: DubSegment[] = segs.map(s => ({ index: s.index, text: s.text, voice: s.role }));
+        batchDub(projectId, dubItems, (m: ProgressMsg) => {
+          setExportMsg(m.message || '');
+          if (m.status === 'done') {
+            setExportBusy(false);
+            // ★ 释放 channel 引用（缓存由 providers._taskChans 持有）
+            try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
+            actions.task(`批量配音完成（${segs.length} 段）`, 100);
+          }
+          else if (m.status === 'failed') {
+            setExportBusy(false);
+            try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
+            actions.task('批量配音失败：' + (m.message || ''), 100);
+          }
+        }).catch((e) => {
+          setExportBusy(false);
+          actions.task('批量配音失败：' + String(e), 100);
+        });
+        break;
+      case 'translate':
+        // 翻译至：先让用户选语种（弹一个临时确认）
+        const lang = window.prompt('翻译至：\n1. zh — 中文\n2. en — English\n3. ja — 日本語\n\n输入 1/2/3 选语种：', '2');
+        const langMap: Record<string, 'zh' | 'en' | 'ja'> = { '1': 'zh', '2': 'en', '3': 'ja', zh: 'zh', en: 'en', ja: 'ja' };
+        const picked = langMap[lang || ''];
+        if (!picked) { actions.task('已取消翻译', 100); break; }
+        if (segs.length === 0) { actions.task('暂无分镜可翻译', 100); break; }
+        if (!projectId) { actions.task('缺少工程 ID', 100); break; }
+        setExportBusy(true); setExportMsg('翻译中');
+        translateScript(projectId, {
+          language: picked,
+          segments: segs.map(s => ({ index: s.index, section: s.section, start: s.start, end: s.end, text: s.text })),
+        }).then((out) => {
+          setExportBusy(false);
+          if (out && out.length > 0) {
+            const next = segs.map(s => ({ ...s, text: out.find((x: any) => x.index === s.index)?.text || s.text }));
+            setSegs(next);
+            onScriptChange?.(next.map(s => `[${s.section}] ${fmtShort(s.start)}-${fmtShort(s.end)} ${s.text}`).join('\n'));
+            actions.task(`翻译完成（${picked.toUpperCase()}）· ${out.length} 段`, 100);
+          } else {
+            actions.task('翻译结果为空', 100);
+          }
+        }).catch((e) => { setExportBusy(false); actions.task('翻译失败：' + String(e), 100); });
+        break;
+      case 'export_jy':
+        // 导出剪映草稿：生成 jianying_drafts/<project>_<ts>/
+        if (!projectId) { actions.task('缺少工程 ID', 100); break; }
+        setExportBusy(true); setExportMsg('导出剪映草稿中');
+        exportJianyingDraft(projectId, { script: segsToScript(segs), videoPath: (window as any).__vf_videoPath || '', rangeStart, rangeEnd }, (m: ProgressMsg) => {
+          setExportMsg(m.message || '');
+          if (m.status === 'done') {
+            setExportBusy(false);
+            const d = (m.payload as any)?.draftDir || '';
+            actions.task('剪映草稿已生成：' + d, 100);
+            try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
+          } else if (m.status === 'failed') {
+            setExportBusy(false);
+            actions.task('剪映草稿导出失败：' + (m.message || ''), 100);
+            try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
+          }
+        }).catch((e) => { setExportBusy(false); actions.task('剪映草稿失败：' + String(e), 100); });
+        break;
       default:
         actions.task(`${TOOLBAR.find((t) => t.id === id)?.label || id}（M5 实现）`, 100);
     }
@@ -308,10 +744,10 @@ export default function Step6DubAndCut({
                       )}
                     </td>
                     <td>
-                      <button className="film-step6__mini-btn" onClick={() => actions.task('单条配音（M5）', 100)}>单独配音</button>
+                      <button className="film-step6__mini-btn" onClick={() => dubOne(s.index)}>单独配音</button>
                     </td>
                     <td>
-                      <button className="film-step6__icon-btn" title="复制" onClick={() => actions.task('复制分镜（M5）', 100)}>📋</button>
+                      <button className="film-step6__icon-btn" title="复制" onClick={() => copySegment(s.index)}>📋</button>
                       <button className="film-step6__icon-btn" title="上移" onClick={() => moveSegment(s.index, -1)}>↑</button>
                       <button className="film-step6__icon-btn" title="下移" onClick={() => moveSegment(s.index, 1)}>↓</button>
                       <button className="film-step6__icon-btn" title="删除" onClick={() => removeSegment(s.index)}>🗑</button>
@@ -335,16 +771,16 @@ export default function Step6DubAndCut({
             <option>简约-无边框</option>
             <option>阴影-黑字阴影</option>
           </select>
-          <label className="film-step6__check"><input type="checkbox" onChange={() => actions.task('遵循原字幕（M5）', 100)} /> 遵循原字幕（仅支持剪映6.0以下版本）</label>
-          <label className="film-step6__check"><input type="checkbox" onChange={() => actions.task('花字（M5）', 100)} /> 花字</label>
-          <label className="film-step6__check"><input type="checkbox" onChange={() => actions.task('音频强制对齐（M5）', 100)} /> 音频强制对齐</label>
+          <label className="film-step6__check"><input type="checkbox" checked={followOriginal} onChange={(e) => { const v = e.target.checked; setFollowOriginal(v); actions.task(v ? '遵循原字幕（导出时附加 ASR 转写原文到素材轨）' : '关闭遵循原字幕', 100); }} /> 遵循原字幕（仅支持剪映6.0以下版本）</label>
+          <label className="film-step6__check"><input type="checkbox" checked={flowerText} onChange={(e) => { const v = e.target.checked; setFlowerText(v); actions.task(v ? '开启花字' : '关闭花字', 100); }} /> 花字</label>
+          <label className="film-step6__check"><input type="checkbox" checked={strictAlign} onChange={(e) => { const v = e.target.checked; setStrictAlign(v); actions.task(v ? '开启音频强制对齐（更严格质检/去重）' : '关闭强制对齐', 100); }} /> 音频强制对齐</label>
         </div>
         <div className="film-step6__bottom-exports">
           <button className="btn primary film-step6__export-btn" onClick={exportJianying} disabled={exportBusy}>
             {exportBusy ? (exportMsg || '导出中...') : '📤 导出剪映草稿'}
           </button>
-          <button className="btn sm" onClick={() => actions.task('导出 Premiere（M5 远期）', 100)}>📤 导出 Premiere</button>
-          <button className="btn sm" onClick={() => actions.task('导出国际剪映（M5 远期）', 100)}>📤 导出国际剪映</button>
+          <button className="btn sm" onClick={exportPremiereClick}>📤 导出 Premiere</button>
+          <button className="btn sm" onClick={exportJianyingIntlClick}>📤 导出国际剪映</button>
           <button className="btn sm ghost" onClick={generateSrt}>💾 导出 SRT</button>
         </div>
       </div>

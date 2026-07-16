@@ -1929,15 +1929,15 @@ input[type="range"]::-webkit-slider-thumb {
 }
 @keyframes va-spin { to { transform: rotate(360deg); } }
 .va-fail { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: #fdf1ee; color: #c0392b; font-size: 13px; }
-.va-report { margin-top: 16px; border: 1px solid #e6dfd1; border-radius: 12px; overflow: hidden; background: #fffaf2; }
+.va-report { margin-top: 16px; border: 1px solid #e6dfd1; border-radius: 12px; overflow: hidden; background: #fffaf2; min-width: 0; }
 .va-report__head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: #f3e8d6; font-weight: 600; color: #2d1810; font-size: 13px; }
 .va-report__body {
-  margin: 0; padding: 14px; max-height: 280px; overflow-y: auto; font-size: 12.5px; line-height: 1.6;
-  white-space: pre-wrap; word-break: break-word; color: #3a2a1d; background: #fffdf8;
+  margin: 0; padding: 14px; max-height: 56vh; min-width: 0; overflow-y: auto; font-size: 12.5px; line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; color: #3a2a1d; background: #fffdf8;
 }
 .film-step5__analysis { margin: 4px 0 18px; border: 1px solid #e6dfd1; border-radius: 12px; overflow: hidden; background: #fffaf2; }
 .film-step5__analysis > summary { cursor: pointer; padding: 12px 14px; background: #f3e8d6; font-weight: 600; color: #2d1810; font-size: 13px; }
-.film-step5__analysis-body { margin: 0; padding: 14px; max-height: 320px; overflow-y: auto; font-size: 12.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; color: #3a2a1d; background: #fffdf8; }
+.film-step5__analysis-body { margin: 0; padding: 14px; max-height: 56vh; min-width: 0; overflow-y: auto; font-size: 12.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; color: #3a2a1d; background: #fffdf8; }
 .narrative-step-content { display: flex; flex-direction: column; gap: 14px; }
 .narrative-step-title { font-size: 18px; font-weight: 700; font-family: 'Fraunces', serif; color: #2d1810; }
 .narrative-step-desc { font-size: 13px; color: #6b6359; }

@@ -144,6 +144,14 @@ pub fn run() {
             commands::submit_film_video_analysis,
             commands::get_film_analysis,
             commands::get_video_server_url,
+            commands::voice_list,
+            commands::batch_dub,
+            commands::translate_script,
+            commands::film_jianying_draft,
+            commands::import_script,
+            commands::import_audio_dub,
+            commands::film_premiere_export,
+            commands::film_jianying_draft_intl,
         ])
         .run(tauri::generate_context!())
         .expect("error while running VideosFlow");

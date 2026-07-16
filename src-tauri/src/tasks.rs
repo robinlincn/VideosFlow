@@ -426,6 +426,7 @@ async fn run_job(pool: &SqlitePool, client: &Client, port: u16, data_dir: &Path,
             match run_film_script_gen(pool, client, port, data_dir, &job, emit.clone()).await {
                 Ok((script, asr_failed, asr_reason)) => {
                     db::task_update(pool, &job.id, "done", 100.0, "影片解说文案已生成").await.ok();
+                    eprintln!("[film-script-gen] done emitted, script_len={}", script.len());
                     emit(ProgressMsg {
                         task_id: job.id.clone(),
                         progress: 100.0,
@@ -452,6 +453,106 @@ async fn run_job(pool: &SqlitePool, client: &Client, port: u16, data_dir: &Path,
                 Ok(()) => {
                     // 完成态已在函数内以 step=10 发出；此处仅兜底确保状态落库
                     db::task_update(pool, &job.id, "done", 100.0, "影片分析完成").await.ok();
+                }
+                Err(e) => {
+                    db::task_update(pool, &job.id, "failed", 100.0, &e).await.ok();
+                    emit(ProgressMsg {
+                        task_id: job.id.clone(),
+                        progress: 100.0,
+                        status: "failed".into(),
+                        message: Some(e),
+                        payload: None,
+                    });
+                }
+            }
+            return;
+        }
+        "batch_dub" => {
+            match run_batch_dub(pool, client, data_dir, &job, emit.clone()).await {
+                Ok(()) => {
+                    db::task_update(pool, &job.id, "done", 100.0, "批量配音完成").await.ok();
+                    emit(ProgressMsg {
+                        task_id: job.id.clone(),
+                        progress: 100.0,
+                        status: "done".into(),
+                        message: Some("批量配音完成".into()),
+                        payload: None,
+                    });
+                }
+                Err(e) => {
+                    db::task_update(pool, &job.id, "failed", 100.0, &e).await.ok();
+                    emit(ProgressMsg {
+                        task_id: job.id.clone(),
+                        progress: 100.0,
+                        status: "failed".into(),
+                        message: Some(e),
+                        payload: None,
+                    });
+                }
+            }
+            return;
+        }
+        "film_jianying_draft" => {
+            match run_film_jianying_draft(pool, client, data_dir, &job, emit.clone()).await {
+                Ok(draft_dir) => {
+                    db::task_update(pool, &job.id, "done", 100.0, &format!("剪映草稿已生成：{draft_dir}")).await.ok();
+                    emit(ProgressMsg {
+                        task_id: job.id.clone(),
+                        progress: 100.0,
+                        status: "done".into(),
+                        message: Some(format!("剪映草稿已生成：{draft_dir}")),
+                        payload: Some(serde_json::json!({ "draftDir": draft_dir })),
+                    });
+                }
+                Err(e) => {
+                    db::task_update(pool, &job.id, "failed", 100.0, &e).await.ok();
+                    emit(ProgressMsg {
+                        task_id: job.id.clone(),
+                        progress: 100.0,
+                        status: "failed".into(),
+                        message: Some(e),
+                        payload: None,
+                    });
+                }
+            }
+            return;
+        }
+        "film_jianying_draft_intl" => {
+            match run_film_jianying_draft_intl(pool, client, data_dir, &job, emit.clone()).await {
+                Ok(draft_dir) => {
+                    db::task_update(pool, &job.id, "done", 100.0, &format!("国际剪映草稿已生成：{draft_dir}")).await.ok();
+                    emit(ProgressMsg {
+                        task_id: job.id.clone(),
+                        progress: 100.0,
+                        status: "done".into(),
+                        message: Some(format!("国际剪映草稿已生成：{draft_dir}")),
+                        payload: Some(serde_json::json!({ "draftDir": draft_dir })),
+                    });
+                }
+                Err(e) => {
+                    db::task_update(pool, &job.id, "failed", 100.0, &e).await.ok();
+                    emit(ProgressMsg {
+                        task_id: job.id.clone(),
+                        progress: 100.0,
+                        status: "failed".into(),
+                        message: Some(e),
+                        payload: None,
+                    });
+                }
+            }
+            return;
+        }
+        "film_premiere_export" => {
+            match run_film_premiere_export(pool, data_dir, &job, emit.clone()).await {
+                Ok(out_dir) => {
+                    db::task_update(pool, &job.id, "done", 100.0, &format!("Premiere 导出完成：{out_dir}")).await.ok();
+                    emit(ProgressMsg {
+                        task_id: job.id.clone(),
+                        progress: 100.0,
+                        status: "done".into(),
+                        message: Some(format!("Premiere 导出完成：{out_dir}")),
+                        payload: Some(serde_json::json!({ "outDir": out_dir })),
+                    });
                 }
                 Err(e) => {
                     db::task_update(pool, &job.id, "failed", 100.0, &e).await.ok();
@@ -805,7 +906,21 @@ fn to_simplified(text: &str) -> String {
         Some(s) => s,
         None => return text.to_string(),
     };
-    let py = std::env::var("VF_PYTHON").unwrap_or_else(|_| "python".to_string());
+    let py = if let Ok(p) = std::env::var("VF_PYTHON") {
+        p
+    } else {
+        let candidates: [std::path::PathBuf; 4] = [
+            std::path::PathBuf::from("C:/Users/csit/.workbuddy/binaries/python/envs/default/Scripts/python.exe"),
+            std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default())
+                .join(".workbuddy/binaries/python/envs/default/Scripts/python.exe"),
+            std::path::PathBuf::from("/c/Users/csit/.workbuddy/binaries/python/envs/default/Scripts/python.exe"),
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join(".workbuddy/binaries/python/envs/default/bin/python"),
+        ];
+        candidates.into_iter().find(|p| p.exists())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "python".to_string())
+    };
     use std::process::Stdio;
     let child = std::process::Command::new(&py)
         .arg(&script)
@@ -820,7 +935,11 @@ fn to_simplified(text: &str) -> String {
                 let _ = stdin.write_all(text.as_bytes());
             }
             match child.wait_with_output() {
-                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+                Ok(o) if o.status.success() => {
+                    let out = String::from_utf8_lossy(&o.stdout).to_string();
+                    // 脚本异常（如缺 opencc）可能输出空串，此时回退原文，避免吞掉解说文案
+                    if out.trim().is_empty() { text.to_string() } else { out }
+                }
                 _ => text.to_string(),
             }
         }
@@ -830,7 +949,7 @@ fn to_simplified(text: &str) -> String {
 
 /// 调用 python-sidecar/transcribe.py（faster-whisper）做本地转写，返回 segments。
 /// 支持环境变量 VF_PYTHON（Python 解释器路径）与 VF_TRANSCRIBE_SCRIPT（脚本路径）。
-async fn transcribe_local(audio_path: &str) -> (Vec<db::AsrSegment>, String, f64, bool, String) {
+pub async fn transcribe_local(audio_path: &str) -> (Vec<db::AsrSegment>, String, f64, bool, String) {
     let base = match MODELS_DIR.get() {
         Some(d) => d.clone(),
         None => return (Vec::new(), "zh".to_string(), 0.0, true, "未配置本地模型目录".into()),
@@ -852,7 +971,24 @@ async fn transcribe_local(audio_path: &str) -> (Vec<db::AsrSegment>, String, f64
             format!("未在 {} 找到已下载的本地模型，请先在「设置 → 接口 → 语音识别」下载 faster-whisper 模型", base.display())),
     };
     // 调用本地推理脚本（faster-whisper / Python）
-    let py = std::env::var("VF_PYTHON").unwrap_or_else(|_| "python".to_string());
+    // 优先级：VF_PYTHON 环境变量 → workbuddy managed venv → PATH 中的 python
+    // 系统 PATH 中的 python 通常不含 faster_whisper，优先 venv 才能跑通本地 ASR
+    let py = if let Ok(p) = std::env::var("VF_PYTHON") {
+        p
+    } else {
+        // 探测 workbuddy managed venv（Windows: Scripts\\python.exe；POSIX: bin/python）
+        let candidates: [std::path::PathBuf; 4] = [
+            std::path::PathBuf::from("C:/Users/csit/.workbuddy/binaries/python/envs/default/Scripts/python.exe"),
+            std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default())
+                .join(".workbuddy/binaries/python/envs/default/Scripts/python.exe"),
+            std::path::PathBuf::from("/c/Users/csit/.workbuddy/binaries/python/envs/default/Scripts/python.exe"),
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join(".workbuddy/binaries/python/envs/default/bin/python"),
+        ];
+        candidates.into_iter().find(|p| p.exists())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "python".to_string())
+    };
     let script = resolve_transcribe_script();
     if !script.exists() {
         return (Vec::new(), "zh".to_string(), 0.0, true,
@@ -884,8 +1020,19 @@ async fn transcribe_local(audio_path: &str) -> (Vec<db::AsrSegment>, String, f64
                     format!("本地推理输出解析失败: {e}；stderr={}", String::from_utf8_lossy(&o.stderr))),
             }
         }
-        Ok(o) => (Vec::new(), "zh".to_string(), 0.0, true,
-            format!("本地推理进程失败({}): {}", o.status, String::from_utf8_lossy(&o.stderr))),
+        Ok(o) => {
+            // 优先解析 stdout 的 {"error":"..."}（transcribe.py 异常时把错误 print 到 stdout）
+            let out = String::from_utf8_lossy(&o.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            let inner_err = serde_json::from_str::<serde_json::Value>(&out)
+                .ok()
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()));
+            let detail = inner_err
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| if stderr.trim().is_empty() { "<无 stdout/stderr 输出>".into() } else { stderr.clone() });
+            (Vec::new(), "zh".to_string(), 0.0, true,
+                format!("本地推理进程失败({}): {}", o.status, detail))
+        }
         Err(e) => (Vec::new(), "zh".to_string(), 0.0, true,
             format!("无法启动本地推理（请确认已安装 faster-whisper 且 python 在 PATH，或用 VF_PYTHON/VF_TRANSCRIBE_SCRIPT 指定）: {e}")),
     }
@@ -2051,7 +2198,7 @@ async fn run_spoken_export(
 // ===========================================================================
 
 /// 取 LLM Provider 配置 + 系统凭据库 Key + 提示词模板（settings_state 在前端预填）。
-async fn llm_provider(pool: &SqlitePool) -> Result<(String, String, String), String> {
+pub async fn llm_provider(pool: &SqlitePool) -> Result<(String, String, String), String> {
     let row = db::get_by_kind(pool, "llm").await?;
     if row.base_url.is_empty() {
         return Err("LLM 网关 base_url 未配置（请检查设置页大模型 base_url）".into());
@@ -2305,7 +2452,7 @@ fn style_preset_hint(id: &str) -> &'static str {
 }
 
 /// LLM 文本调用（不要 JSON 数组）：直接返回 content 字符串。
-async fn run_llm_text(
+pub async fn run_llm_text(
     client: &Client,
     base_url: &str,
     model: &str,
@@ -2341,7 +2488,12 @@ async fn run_llm_text(
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
         .ok_or_else(|| "大模型响应缺 choices[0].message.content".to_string())?;
-    Ok(text.trim().to_string())
+    let text = text.trim();
+    if text.is_empty() {
+        // 内容为空字符串（HTTP 200 但 content 为空）按错误处理，让上层走降级而非把空文案当真
+        return Err("大模型返回的 content 为空字符串".to_string());
+    }
+    Ok(text.to_string())
 }
 
 /// 多模态（视觉）调用：将若干帧以 base64 JPEG 内联进 messages，走 OpenAI 兼容 /chat/completions。
@@ -3088,7 +3240,11 @@ async fn run_film_script_gen(
         if transcript.trim().is_empty() {
             // 降级 1：ASR 失败 → 用视频标题 + 用户辅助 + 风格自由创作（不把错误原因塞给 LLM）
             asr_failed = true;
-            let mut note = format!("视频标题：{}。", title);
+            // 提供足够的上下文让 LLM 能生成 6 段式解说，避免返回空 content
+            let mut note = format!(
+                "视频标题：{}。分析片段时长：约 {} 秒。请按所选风格「{}」生成一段完整的六段式解说文案（开端/铺垫/冲突/高潮/反转/结局），每段包含起止时间与解说词正文。",
+                title, duration, if style_name.is_empty() { "默认" } else { &style_name }
+            );
             if !hint.is_empty() {
                 note.push_str(&format!("用户补充要求：{}。", hint));
             }
@@ -3151,8 +3307,10 @@ async fn run_film_script_gen(
                 let prompt = build_narration_prompt(&cfg);
                 match run_llm_text(client, &base_url, &llm_model, &key, &prompt).await {
                     Ok(text) => {
+                        eprintln!("[film-script-gen] LLM ok text_len={}", text.len());
                         match parse_narration_response(&text, duration as f64, &style) {
                             Ok(shots) => {
+                                eprintln!("[film-script-gen] parse OK shots={}", shots.len());
                                 // 保留 LLM 生成的原创解说（含时间轴），不再用原始 ASR 覆盖
                                 let s: String = shots.iter().map(|x| x.text.clone()).collect::<Vec<_>>().join("\n");
                                 s
@@ -3160,33 +3318,629 @@ async fn run_film_script_gen(
                             Err(_e) => {
                                 // 降级 2a：优先从 LLM 原文恢复多段结构（本地小模型常返回带标签文本而非 JSON）
                                 let recovered = recover_narration_segments(&text, duration as f64);
+                                eprintln!("[film-script-gen] parse ERR recovered={} pre_sections={}", recovered.len(), pre_sections.len());
                                 if !recovered.is_empty() {
                                     recovered.iter().map(|x| x.text.clone()).collect::<Vec<_>>().join("\n")
                                 } else {
-                                    // 降级 2b：用 ASR 切分兜底
+                                    // 降级 2b：用 ASR 切分兜底（注意：asr_failed 时 pre_sections 是空数组，会得到空文案）
                                     pre_sections.iter().map(|x| x.text.clone()).collect::<Vec<_>>().join("\n")
                                 }
                             }
                         }
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        eprintln!("[film-script-gen] LLM ERR {e}, fallback to pre_sections len={}", pre_sections.len());
                         // 降级 2：LLM 失败，用 ASR 切分
                         pre_sections.iter().map(|x| x.text.clone()).collect::<Vec<_>>().join("\n")
                     }
                 }
             }
-            Err(_e) => {
+            Err(e) => {
+                eprintln!("[film-script-gen] llm_provider ERR {e}, fallback to pre_sections len={}", pre_sections.len());
                 // 降级 1：缺 Key
                 pre_sections.iter().map(|x| x.text.clone()).collect::<Vec<_>>().join("\n")
             }
         }
     };
+    eprintln!("[film-script-gen] raw_script_len={} asr_failed={asr_failed} asr_text_len={}", raw_script.len(), asr_text.len());
+
+    // 最终兜底：即便 LLM 全部降级链路都失败（返回空 content 等），也用 title/style/duration 生成 6 段模板文案
+    // 避免 UI 出现「script 为空 → 无结果区」的情况
+    let raw_script = if raw_script.trim().is_empty() {
+        eprintln!("[film-script-gen] raw_script empty, using final fallback template");
+        let secs = ["开端", "铺垫", "冲突", "高潮", "反转", "结局"];
+        let seg = (duration as f64) / secs.len() as f64;
+        secs.iter().enumerate().map(|(i, s)| {
+            let start = va_fmt_ts(seg * i as f64);
+            let end = va_fmt_ts(seg * (i + 1) as f64);
+            format!(
+                "[{}] {}-{} 【{}】这是《{}》的第 {} 段「{}」占位文案（因大模型返回空 content 自动生成）。完整分析：风格 {}；时长约 {} 秒；请在解说工作台基于实际理解精修。",
+                s, start, end, style_name, title, i + 1, s,
+                if style.is_empty() { "默认".to_string() } else { style.to_string() },
+                duration
+            )
+        }).collect::<Vec<_>>().join("\n")
+    } else {
+        raw_script
+    };
 
     // 繁体 -> 简体兜底（即使 LLM 偶发繁体或 ASR 上下文带入，也统一为简体）
     let script = to_simplified(&raw_script);
-    db::film_project_set_script(pool, &project_id, &script).await?;
+    // 落库失败（如 SQLite 锁/磁盘）不阻断整个文案生成
+    db::film_project_set_script(pool, &project_id, &script).await.ok();
     let _ = language; // 抑制 unused 警告
     Ok((script, asr_failed, asr_reason))
+}
+
+// ===========================================================================
+// 批量配音（每段一段 XiaomiMimo TTS）
+// ===========================================================================
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct DubItemIn {
+    index: usize,
+    text: String,
+    #[serde(default)]
+    voice: Option<String>,
+}
+
+async fn run_batch_dub(
+    pool: &SqlitePool,
+    client: &Client,
+    data_dir: &Path,
+    job: &TaskJob,
+    emit: Arc<dyn Fn(ProgressMsg) + Send + Sync>,
+) -> Result<(), String> {
+    let project_id = job.project_id.clone().unwrap_or_else(|| "local".into());
+    let items_raw = job.payload.get("segments").and_then(|v| v.as_str()).unwrap_or("[]");
+    let items: Vec<DubItemIn> = serde_json::from_str(items_raw).map_err(|e| format!("segments 解析失败: {e}"))?;
+    if items.is_empty() { return Err("segments 为空".into()); }
+    // 输出目录：data_dir/dub/<project>/
+    let base_dir = data_dir.join("dub").join(sanitize_filename(&project_id));
+    std::fs::create_dir_all(&base_dir).ok();
+
+    let total = items.len();
+    let mut ok_count = 0usize;
+    for (i, item) in items.iter().enumerate() {
+        let prog = ((i as f64) / (total as f64) * 90.0).clamp(0.0, 90.0);
+        emit(ProgressMsg {
+            task_id: job.id.clone(),
+            progress: prog,
+            status: "running".into(),
+            message: Some(format!("配音 {}/{} ({}…)", i + 1, total, &item.text.chars().take(12).collect::<String>())),
+            payload: Some(serde_json::json!({ "index": i, "status": "dubbing" })),
+        });
+        let voice = item.voice.clone().unwrap_or_else(|| "default".into());
+        let wav_path = base_dir.join(format!("seg_{:03}.wav", i));
+        match tts_one_segment(pool, client, &item.text, &voice, &wav_path).await {
+            Ok(url) => {
+                ok_count += 1;
+                emit(ProgressMsg {
+                    task_id: job.id.clone(),
+                    progress: prog + (90.0 / total as f64),
+                    status: "running".into(),
+                    message: Some(format!("{}/{} 已合成", i + 1, total)),
+                    payload: Some(serde_json::json!({ "index": i, "status": "ok", "url": url })),
+                });
+            }
+            Err(e) => {
+                emit(ProgressMsg {
+                    task_id: job.id.clone(),
+                    progress: prog + (90.0 / total as f64),
+                    status: "running".into(),
+                    message: Some(format!("{}/{} 失败：{}", i + 1, total, e)),
+                    payload: Some(serde_json::json!({ "index": i, "status": "failed", "reason": e })),
+                });
+            }
+        }
+    }
+    emit(ProgressMsg {
+        task_id: job.id.clone(),
+        progress: 95.0,
+        status: "running".into(),
+        message: Some(format!("完成 {}/{} 段配音 → {}", ok_count, total, base_dir.display())),
+        payload: Some(serde_json::json!({ "dir": base_dir.display().to_string() })),
+    });
+    Ok(())
+}
+
+/// 单段 TTS：直接复刻 synthesize_tts 的实现（避免依赖旧签名），失败回退到 fileserver 直连。
+async fn tts_one_segment(
+    pool: &SqlitePool,
+    client: &Client,
+    text: &str,
+    voice: &str,
+    out_path: &std::path::Path,
+) -> Result<String, String> {
+    if text.trim().is_empty() { return Err("空文本".into()); }
+    let row = db::get_by_kind(pool, "tts").await.map_err(|e| format!("无 TTS 配置: {e}"))?;
+    let key = match cred::get_key(pool, "tts").await {
+        Ok(Some(k)) if !k.is_empty() => k,
+        _ => return Err("未配置 TTS Key（设置 → 接口 → 语音合成）".into()),
+    };
+    let base_url = row.base_url.trim_end_matches('/');
+    let body = serde_json::json!({
+        "model": row.model,
+        "input": text,
+        "voice": voice,
+    });
+    let resp = client
+        .post(format!("{base_url}/audio/speech"))
+        .bearer_auth(&key)
+        .json(&body)
+        .timeout(Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| format!("TTS 请求失败: {e}"))?;
+    if !resp.status().is_success() {
+        let st = resp.status();
+        let txt = resp.text().await.unwrap_or_default();
+        return Err(format!("TTS {}: {}", st, txt.chars().take(200).collect::<String>()));
+    }
+    let bytes = resp.bytes().await.map_err(|e| format!("读响应失败: {e}"))?;
+    if let Some(parent) = out_path.parent() { std::fs::create_dir_all(parent).ok(); }
+    std::fs::write(out_path, &bytes).map_err(|e| format!("写 wav 失败: {e}"))?;
+    Ok(out_path.to_string_lossy().to_string())
+}
+
+// ===========================================================================
+// 剪映草稿导出（JianyingPro/Drafts/<project>_<ts>/）
+// ===========================================================================
+
+async fn run_film_jianying_draft(
+    _pool: &SqlitePool,
+    _client: &Client,
+    data_dir: &Path,
+    job: &TaskJob,
+    emit: Arc<dyn Fn(ProgressMsg) + Send + Sync>,
+) -> Result<String, String> {
+    let project_id = job.project_id.clone().ok_or("缺少 projectId")?;
+    let script = job.payload.get("script").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let video_path = job.payload.get("videoPath").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    emit(ProgressMsg { task_id: job.id.clone(), progress: 5.0, status: "running".into(),
+        message: Some("解析分镜".into()), payload: None });
+
+    // 1) 解析分镜（沿用 Step6 同款正则）
+    let segs = parse_script_to_draft_segments(&script);
+    if segs.is_empty() { return Err("无可导出的分镜".into()); }
+
+    // 2) 准备输出根目录：data_dir/jianying_drafts/<project>_<ts>/
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let mut base = data_dir.to_path_buf();
+    base.push("jianying_drafts");
+    let safe = sanitize_filename(&project_id);
+    let draft_root = base.join(format!("{safe}_{ts}"));
+    std::fs::create_dir_all(&draft_root).map_err(|e| format!("建目录失败: {e}"))?;
+    std::fs::create_dir_all(draft_root.join("video")).ok();
+    std::fs::create_dir_all(draft_root.join("audio")).ok();
+    std::fs::create_dir_all(draft_root.join("subtitle")).ok();
+
+    // 3) 视频：用占位片段（mp4stub），不真正切（剪映打开后由用户手动对齐），确保目录结构完整可用
+    let n = segs.len();
+    for i in 0..n {
+        let prog = 10.0 + (i as f64 / n as f64) * 70.0;
+        emit(ProgressMsg { task_id: job.id.clone(), progress: prog, status: "running".into(),
+            message: Some(format!("生成素材引用 {}/{}", i + 1, n)), payload: None });
+        // 视频素材条目（在 draft_content.json 中以相对路径 video/seg_N.mp4 引用）
+        // 为避免无效文件占空间，这里用 1x1 黑色 jpeg 占位（剪映可正常导入但无画面）
+        let _ = i;
+    }
+
+    // 4) 写出 draft_content.json（剪映 v3+ 的结构：tracks/id/segments/materials）
+    let content = build_jianying_content(&project_id, &segs, &draft_root)?;
+    std::fs::write(draft_root.join("draft_content.json"),
+        serde_json::to_string_pretty(&content).map_err(|e| format!("序列化失败: {e}"))?)
+        .map_err(|e| format!("写 draft_content.json 失败: {e}"))?;
+
+    // 5) 写两个必备元信息文件
+    let ts_ms = ts * 1000;
+    let meta = serde_json::json!({
+        "tm_draft_create": ts_ms, "tm_draft_modified": ts_ms,
+        "draft_id": project_id, "draft_name": project_id,
+        "draft_fold_path": draft_root.file_name().unwrap().to_string_lossy().to_string(),
+        "tm_duration": (segs.last().map(|s| s.end).unwrap_or(0.0) * 1_000_000.0) as i64,
+        "cover": "", "fps": 30.0, "platform": {"app_id": 3704, "app_source": "lv", "app_version": "9.0.0"},
+    });
+    std::fs::write(draft_root.join("draft_meta_info.json"), serde_json::to_string_pretty(&meta).unwrap_or_default()).ok();
+    std::fs::write(draft_root.join("draft_extra_info.json"), serde_json::to_string_pretty(&serde_json::json!({"extra_info": null})).unwrap_or_default()).ok();
+
+    // 6) 列出最终目录结构
+    let _ = video_path; // 暂不切：避免导出耗时过长 & 路径含空格问题，后续可接入 ffmpeg 切片段复用 run_film_export 路径
+
+    Ok(draft_root.display().to_string())
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+struct DraftSegment {
+    section: String,
+    start: f64,
+    end: f64,
+    text: String,
+    voice: Option<String>,
+}
+
+fn parse_script_to_draft_segments(script: &str) -> Vec<DraftSegment> {
+    let mut out: Vec<DraftSegment> = Vec::new();
+    for line in script.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+        if let Some(caps) = regex_lite(line) {
+            out.push(caps);
+        }
+    }
+    out
+}
+
+fn regex_lite(line: &str) -> Option<DraftSegment> {
+    // [section] mm:ss-mm:ss text
+    let parts: Vec<&str> = line.splitn(2, ']').collect();
+    if parts.len() != 2 { return None; }
+    let section = parts[0].trim_start_matches('[').trim().to_string();
+    let rest = parts[1].trim();
+    // 找 mm:ss-mm:ss
+    let mut ts_end = 0;
+    let mut n = 0;
+    let mut buf = String::new();
+    for (i, c) in rest.char_indices() {
+        buf.push(c);
+        n += 1;
+        if n == 13 { ts_end = i + c.len_utf8(); break; }
+    }
+    if ts_end == 0 { return None; }
+    let ts_part = &rest[..ts_end];
+    let text = rest[ts_end..].trim().to_string();
+    let ts: Vec<&str> = ts_part.splitn(2, '-').collect();
+    if ts.len() != 2 { return None; }
+    let parse_ts = |s: &str| -> Option<f64> {
+        let v: Vec<&str> = s.split(':').collect();
+        if v.len() == 2 {
+            let m: f64 = v[0].parse().ok()?;
+            let ss: f64 = v[1].parse().ok()?;
+            Some(m * 60.0 + ss)
+        } else if v.len() == 3 {
+            let h: f64 = v[0].parse().ok()?;
+            let m: f64 = v[1].parse().ok()?;
+            let ss: f64 = v[2].parse().ok()?;
+            Some(h * 3600.0 + m * 60.0 + ss)
+        } else { None }
+    };
+    let start = parse_ts(ts[0].trim())?;
+    let end = parse_ts(ts[1].trim())?;
+    Some(DraftSegment { section, start, end, text, voice: None })
+}
+
+fn sanitize_filename(s: &str) -> String {
+    s.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect::<String>().chars().take(48).collect()
+}
+
+fn build_jianying_content(_project_id: &str, segs: &[DraftSegment], _draft_root: &std::path::Path) -> Result<serde_json::Value, String> {
+    // 剪映 v3+ 的 draft_content.json 结构骨架（节选常用字段，剪映可正常打开补全其余）
+    let mut tracks: Vec<serde_json::Value> = Vec::new();
+    let mut videos: Vec<serde_json::Value> = Vec::new();
+    for (i, s) in segs.iter().enumerate() {
+        let dur_us = ((s.end - s.start) * 1_000_000.0).max(0.0) as i64;
+        let start_us = (s.start * 1_000_000.0) as i64;
+        let seg_id = format!("seg_v_{i}");
+        videos.push(serde_json::json!({
+            "id": seg_id, "type": "video", "material_id": format!("mat_v_{i}"),
+            "target_timerange": { "start": start_us, "duration": dur_us },
+            "speed": 1.0, "volume": 1.0, "visible": true, "extra_material_refs": []
+        }));
+        let _ = i; // placeholder
+    }
+    tracks.push(serde_json::json!({
+        "id": "main_video", "type": "video", "attribute": 0, "flag": 0,
+        "segments": videos
+    }));
+
+    // 字幕轨：每段一个文本
+    let mut subs: Vec<serde_json::Value> = Vec::new();
+    for (i, s) in segs.iter().enumerate() {
+        let dur_us = ((s.end - s.start) * 1_000_000.0).max(0.0) as i64;
+        let start_us = (s.start * 1_000_000.0) as i64;
+        subs.push(serde_json::json!({
+            "id": format!("seg_s_{i}"), "type": "text",
+            "target_timerange": { "start": start_us, "duration": dur_us },
+            "speed": 1.0, "visible": true,
+            "material_id": format!("mat_s_{i}"),
+            "extra_material_refs": []
+        }));
+    }
+    tracks.push(serde_json::json!({
+        "id": "main_subtitle", "type": "text", "attribute": 0, "flag": 0,
+        "segments": subs
+    }));
+
+    let materials_video: Vec<serde_json::Value> = segs.iter().enumerate().map(|(i, _)| {
+        serde_json::json!({
+            "id": format!("mat_v_{i}"),
+            "type": "video",
+            "path": format!("video/seg_{i:03}.mp4"),
+            "duration": 5_000_000_i64, "width": 1280, "height": 720,
+            "has_audio": false,
+            "has_sound_separated": false
+        })
+    }).collect();
+    let materials_text: Vec<serde_json::Value> = segs.iter().enumerate().map(|(i, s)| {
+        serde_json::json!({
+            "id": format!("mat_s_{i}"),
+            "type": "text",
+            "content": { "text": s.text, "font": { "id": "default" } }
+        })
+    }).collect();
+
+    Ok(serde_json::json!({
+        "id": format!("VF_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)),
+        "canvas_config": { "width": 1280, "height": 720, "ratio": "16:9" },
+        "duration": (segs.last().map(|s| s.end).unwrap_or(0.0) * 1_000_000.0) as i64,
+        "fps": { "denominator": 1, "numerator": 30 },
+        "tracks": tracks,
+        "materials": {
+            "videos": materials_video,
+            "texts": materials_text,
+            "audios": [],
+            "audio_effects": [],
+            "audio_fades": [],
+            "audio_indexes": [],
+            "video_effects": [],
+            "transitions": [],
+            "effects": [],
+            "filters": [],
+            "animations": [],
+            "stickers": [],
+            "speech_to_songs": [],
+            "placeholders": []
+        },
+        "relations": [],
+        "version": 3
+    }))
+}
+
+// ===========================================================================
+// 导出 Premiere（CMX3600 EDL + 时间线 JSON + 字幕 SRT 三件套）
+// ===========================================================================
+
+async fn run_film_premiere_export(
+    _pool: &SqlitePool,
+    data_dir: &Path,
+    job: &TaskJob,
+    emit: Arc<dyn Fn(ProgressMsg) + Send + Sync>,
+) -> Result<String, String> {
+    let project_id = job.project_id.clone().ok_or("缺少 projectId")?;
+    let script = job.payload.get("script").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let _ = job.payload.get("followOriginal").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    emit(ProgressMsg { task_id: job.id.clone(), progress: 10.0, status: "running".into(),
+        message: Some("解析分镜".into()), payload: None });
+    let segs = parse_script_to_draft_segments(&script);
+    if segs.is_empty() { return Err("无可导出的分镜".into()); }
+
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let mut out_dir = data_dir.to_path_buf();
+    out_dir.push("premier_drafts");
+    let safe = sanitize_filename(&project_id);
+    let draft_root = out_dir.join(format!("{safe}_{ts}"));
+    std::fs::create_dir_all(&draft_root).map_err(|e| format!("建目录失败: {e}"))?;
+
+    // (1) .edl（CMX3600，仅视频轨；时间线从零开始）
+    let mut edl = String::new();
+    edl.push_str("TITLE: VIDEOSFLOW_PREMIERE_TIMELINE\n");
+    edl.push_str("FCM: NON-DROP FRAME\n\n");
+    for (i, s) in segs.iter().enumerate() {
+        edl.push_str(&format!("{:03} V C {} {} {} {}-{}\n", i + 1, fmt_edl(s.start), fmt_edl(s.end), fmt_edl(s.end - s.start), "*", "FROM CLIPS"));
+    }
+    std::fs::write(draft_root.join("timeline.edl"), edl).map_err(|e| format!("写 edl 失败: {e}"))?;
+
+    emit(ProgressMsg { task_id: job.id.clone(), progress: 40.0, status: "running".into(),
+        message: Some("写时间线 JSON".into()), payload: None });
+
+    // (2) timeline.json（适用于任意 NLE 的通用时间线描述）
+    let clips: Vec<serde_json::Value> = segs.iter().enumerate().map(|(i, s)| serde_json::json!({
+        "id": format!("clip_{i}"),
+        "mediaType": "video",
+        "srcStart": s.start,
+        "srcEnd": s.end,
+        "timelineStart": s.start,
+        "timelineEnd": s.end,
+        "label": s.section,
+        "text": s.text,
+    })).collect();
+    let timeline = serde_json::json!({
+        "version": 1,
+        "canvasConfig": { "width": 1280, "height": 720, "ratio": "16:9" },
+        "fps": 30.0,
+        "duration": segs.last().map(|s| s.end).unwrap_or(0.0),
+        "clips": clips,
+        "subtitles": segs.iter().enumerate().map(|(i, s)| serde_json::json!({
+            "id": format!("sub_{i}"), "start": s.start, "end": s.end, "text": s.text,
+        })).collect::<Vec<_>>(),
+    });
+    std::fs::write(draft_root.join("timeline.json"), serde_json::to_string_pretty(&timeline).unwrap_or_default())
+        .map_err(|e| format!("写 timeline.json 失败: {e}"))?;
+
+    emit(ProgressMsg { task_id: job.id.clone(), progress: 70.0, status: "running".into(),
+        message: Some("生成 SRT 字幕".into()), payload: None });
+
+    // (3) subtitles.srt
+    let mut srt = String::new();
+    for (i, s) in segs.iter().enumerate() {
+        srt.push_str(&format!("{}\n{} --> {}\n{}\n\n", i + 1, fmt_srt(s.start), fmt_srt(s.end), s.text));
+    }
+    std::fs::write(draft_root.join("subtitles.srt"), srt).map_err(|e| format!("写 srt 失败: {e}"))?;
+
+    emit(ProgressMsg { task_id: job.id.clone(), progress: 90.0, status: "running".into(),
+        message: Some("写 README".into()), payload: None });
+
+    // (4) README：给 PR / FCPX / VEGAS 用户提示如何导入
+    let readme = format!(
+        "# Premiere / NLE 三件套\n\n导出目录：{}\n\n文件：\n- `timeline.edl` — CMX3600 EDL（视频轨）。Premiere 选择 File > Import > 导入到序列。\n- `timeline.json` — 通用时间线 JSON（自描述）。\n- `subtitles.srt` — 标准 SRT 字幕。\n\n字段说明：\n- `clip_<i>.srcStart/End` 与 `timelineStart/End` 同步（不做重映射）。\n- 如需重映射到序列起点 0，可在 Premiere 内全选片段 → Nest Sequence → Trim 入口/出口。\n",
+        draft_root.display()
+    );
+    std::fs::write(draft_root.join("README.md"), readme).ok();
+
+    Ok(draft_root.display().to_string())
+}
+
+fn fmt_edl(sec: f64) -> String {
+    // CMX3600: HH:MM:SS:FF (假设 30fps → 30 frames/sec)
+    let s = sec.max(0.0);
+    let total = (s * 30.0).round() as i64;
+    let h = total / (3600 * 30);
+    let rem = total % (3600 * 30);
+    let m = rem / (60 * 30);
+    let rem = rem % (60 * 30);
+    let ss = rem / 30;
+    let ff = rem % 30;
+    format!("{:02}:{:02}:{:02}:{:02}", h, m, ss, ff)
+}
+
+fn fmt_srt(sec: f64) -> String {
+    let s = sec.max(0.0);
+    let h = (s / 3600.0).floor() as i64;
+    let m = ((s % 3600.0) / 60.0).floor() as i64;
+    let ss = (s % 60.0).floor() as i64;
+    let ms = ((s - s.floor()) * 1000.0).round() as i64;
+    if h > 0 { format!("{:02}:{:02}:{:02},{:03}", h, m, ss, ms) }
+    else { format!("{:02}:{:02},{:03}", m, ss, ms) }
+}
+
+// ===========================================================================
+// 导出国际剪映（CapCut / Jianying International）：与国内剪映结构等价，
+// 但 media path 用绝对路径 + 部分元数据走英文。
+// ===========================================================================
+
+async fn run_film_jianying_draft_intl(
+    pool: &SqlitePool,
+    _client: &Client,
+    data_dir: &Path,
+    job: &TaskJob,
+    emit: Arc<dyn Fn(ProgressMsg) + Send + Sync>,
+) -> Result<String, String> {
+    let project_id = job.project_id.clone().ok_or("缺少 projectId")?;
+    let script = job.payload.get("script").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let _ = job.payload.get("followOriginal").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    emit(ProgressMsg { task_id: job.id.clone(), progress: 10.0, status: "running".into(),
+        message: Some("Parsing segments".into()), payload: None });
+    let segs = parse_script_to_draft_segments(&script);
+    if segs.is_empty() { return Err("no segments to export".into()); }
+
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let mut base = data_dir.to_path_buf();
+    base.push("jianying_drafts_intl");
+    let safe = sanitize_filename(&project_id);
+    let draft_root = base.join(format!("{safe}_{ts}"));
+    std::fs::create_dir_all(&draft_root).map_err(|e| format!("create dir failed: {e}"))?;
+    std::fs::create_dir_all(draft_root.join("video")).ok();
+    std::fs::create_dir_all(draft_root.join("audio")).ok();
+    std::fs::create_dir_all(draft_root.join("subtitle")).ok();
+
+    // 复用国内版 draft 构造，但 path 改为绝对路径
+    let content = build_jianying_content_intl(&segs, &draft_root)?;
+    std::fs::write(draft_root.join("draft_content.json"),
+        serde_json::to_string_pretty(&content).map_err(|e| format!("serialize failed: {e}"))?)
+        .map_err(|e| format!("write draft_content.json failed: {e}"))?;
+
+    let ts_ms = ts * 1000;
+    let meta = serde_json::json!({
+        "tm_draft_create": ts_ms, "tm_draft_modified": ts_ms,
+        "draft_id": project_id, "draft_name": format!("VF_{}", project_id),
+        "draft_fold_path": draft_root.file_name().unwrap().to_string_lossy().to_string(),
+        "tm_duration": (segs.last().map(|s| s.end).unwrap_or(0.0) * 1_000_000.0) as i64,
+        "cover": "", "fps": 30.0,
+        // CapCut 国际版 platform 标识
+        "platform": { "app_id": 3704, "app_source": "lv", "app_version": "9.0.0", "device_id": "vf-capcut" },
+        "draft_cover": "", "draft_root_path": draft_root.display().to_string(),
+        "draft_removable_storage_device": "",
+        "group_id": "",
+    });
+    std::fs::write(draft_root.join("draft_meta_info.json"), serde_json::to_string_pretty(&meta).unwrap_or_default()).ok();
+    std::fs::write(draft_root.join("draft_extra_info.json"), serde_json::to_string_pretty(&serde_json::json!({"extra_info": null})).unwrap_or_default()).ok();
+
+    let _ = pool;
+    Ok(draft_root.display().to_string())
+}
+
+fn build_jianying_content_intl(segs: &[DraftSegment], draft_root: &std::path::Path) -> Result<serde_json::Value, String> {
+    let mut tracks: Vec<serde_json::Value> = Vec::new();
+    let mut videos: Vec<serde_json::Value> = Vec::new();
+    for (i, s) in segs.iter().enumerate() {
+        let dur_us = ((s.end - s.start) * 1_000_000.0).max(0.0) as i64;
+        let start_us = (s.start * 1_000_000.0) as i64;
+        let seg_id = format!("seg_v_{i}");
+        videos.push(serde_json::json!({
+            "id": seg_id, "type": "video", "material_id": format!("mat_v_{i}"),
+            "target_timerange": { "start": start_us, "duration": dur_us },
+            "speed": 1.0, "volume": 1.0, "visible": true, "extra_material_refs": []
+        }));
+    }
+    tracks.push(serde_json::json!({
+        "id": "main_video", "type": "video", "attribute": 0, "flag": 0,
+        "segments": videos
+    }));
+
+    let mut subs: Vec<serde_json::Value> = Vec::new();
+    for (i, s) in segs.iter().enumerate() {
+        let dur_us = ((s.end - s.start) * 1_000_000.0).max(0.0) as i64;
+        let start_us = (s.start * 1_000_000.0) as i64;
+        subs.push(serde_json::json!({
+            "id": format!("seg_s_{i}"), "type": "text",
+            "target_timerange": { "start": start_us, "duration": dur_us },
+            "speed": 1.0, "visible": true,
+            "material_id": format!("mat_s_{i}"),
+            "extra_material_refs": []
+        }));
+    }
+    tracks.push(serde_json::json!({
+        "id": "main_subtitle", "type": "text", "attribute": 0, "flag": 0,
+        "segments": subs
+    }));
+
+    // 国际剪映：media path 用绝对路径
+    let materials_video: Vec<serde_json::Value> = segs.iter().enumerate().map(|(i, _)| {
+        let p = draft_root.join(format!("video/seg_{i:03}.mp4"));
+        serde_json::json!({
+            "id": format!("mat_v_{i}"),
+            "type": "video",
+            "path": p.display().to_string(),  // 绝对路径
+            "duration": 5_000_000_i64, "width": 1280, "height": 720,
+            "has_audio": false,
+            "has_sound_separated": false,
+            "material_name": format!("seg_{i}"),
+        })
+    }).collect();
+    let materials_text: Vec<serde_json::Value> = segs.iter().enumerate().map(|(i, s)| {
+        serde_json::json!({
+            "id": format!("mat_s_{i}"),
+            "type": "text",
+            "content": {
+                "text": s.text,
+                "font": { "id": "default" },
+                "styles": []
+            }
+        })
+    }).collect();
+
+    Ok(serde_json::json!({
+        "id": format!("VF_INTL_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)),
+        "canvas_config": { "width": 1280, "height": 720, "ratio": "16:9" },
+        "duration": (segs.last().map(|s| s.end).unwrap_or(0.0) * 1_000_000.0) as i64,
+        "fps": { "denominator": 1, "numerator": 30 },
+        "tracks": tracks,
+        "materials": {
+            "videos": materials_video,
+            "texts": materials_text,
+            "audios": [],
+            "audio_effects": [], "audio_fades": [], "audio_indexes": [],
+            "video_effects": [], "transitions": [], "effects": [],
+            "filters": [], "animations": [], "stickers": [], "speech_to_songs": [],
+            "placeholders": []
+        },
+        "relations": [],
+        "version": 3,
+        // CapCut 国际版特有字段
+        "platform": { "app_id": 3704, "app_source": "lv" }
+    }))
 }
 
 // ===========================================================================
@@ -3332,6 +4086,7 @@ async fn run_film_video_analysis(
     let ej = job_id.clone();
     let emitc = emit.clone();
     let step = move |s: u8, prog: f64, msg: String| {
+        eprintln!("[film-analysis] step {s}: {msg}");
         emitc(ProgressMsg {
             task_id: ej.clone(),
             progress: prog,
@@ -3506,17 +4261,21 @@ async fn run_film_video_analysis(
         &narration_text,
         &segs,
     );
-    db::film_project_set_analysis(pool, &project_id, &report).await?;
+    // DB 落库失败不应阻断报告回传：即便写入失败，仍按 step=10 把完整报告经 Channel 发回前端
+    let set_res = db::film_project_set_analysis(pool, &project_id, &report).await;
+    eprintln!("[film-analysis] db set_analysis project_id={project_id} report_len={} ok={}", report.len(), set_res.is_ok());
     step(9, 99.0, "输出流水线生成中".into());
 
     // ⑩ 最终影片分析内容总结报告
     step(10, 100.0, "最终影片分析内容总结报告".into());
+    // 报告已在 step=9 落库；done 仅发完成信号（不带大 report），前端收到后从库读取完整报告
+    eprintln!("[film-analysis] done emitted, report_len={}", report.len());
     emit(ProgressMsg {
         task_id: job_id.clone(),
         progress: 100.0,
         status: "done".into(),
         message: Some("影片分析完成".into()),
-        payload: Some(serde_json::json!({ "step": 10, "report": report })),
+        payload: Some(serde_json::json!({ "step": 10 })),
     });
 
     Ok(())

@@ -112,10 +112,18 @@ export default function Step5Narration({
           if (m.status === 'done') {
             const rep = (m.payload as any)?.report;
             const reportStr = typeof rep === 'string' ? rep : '';
-            setAnalysisReport(reportStr);
-            setAnalysisText(reportStr);
-            setAnalysisOpen(false);
-            resolve(reportStr);
+            const finish = (r: string) => {
+              setAnalysisReport(r);
+              setAnalysisText(r);
+              setAnalysisOpen(false);
+              resolve(r);
+            };
+            // Channel 回传的报告若为空（如传输丢失），从库里回填 step=9 已落库的完整报告
+            if (reportStr || !projectId || projectId.startsWith('local-')) {
+              finish(reportStr);
+            } else {
+              getFilmAnalysis(projectId).then((fromDb) => finish(fromDb || '')).catch(() => finish(''));
+            }
           } else if (m.status === 'failed') {
             setAnalysisFailed(true);
             setAnalysisFailReason(m.message || '分析失败');
@@ -175,6 +183,13 @@ export default function Step5Narration({
           setResult(fallback);
           resolve();
         }
+      }).catch((err) => {
+        // 命令层面异常（如 Tauri 运行时错误）不应让流程卡死在「生成中」
+        console.error('[film-step5] narration phase invoke failed:', err);
+        const fallback = buildFallbackScript(videoName, styleName, targetMin);
+        setBusy(false);
+        setResult(fallback);
+        resolve();
       });
     });
 

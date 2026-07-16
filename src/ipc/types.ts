@@ -272,3 +272,37 @@ export interface GeneratedAsset {
   path: string;
   createdAt: number;
 }
+
+// ---------------------------------------------------------------------------
+// 分镜工作台（M2.5+）
+// ---------------------------------------------------------------------------
+
+/** 音色选项（用于「音色库」弹窗）。 */
+export interface VoiceOption {
+  id: string;
+  name: string;
+  /** 可选：语种/性别/标签 */
+  gender?: string;
+  language?: string;
+}
+
+/** 批量配音的单段输入。 */
+export interface DubSegment {
+  index: number;
+  text: string;
+  voice?: string;
+}
+
+/** 翻译请求（segments 仅用于提示词，输出按相同 index 回填）。 */
+export interface TranslateRequest {
+  language: 'zh' | 'en' | 'ja';
+  segments: { index: number; section: string; start: number; end: number; text: string }[];
+}
+
+/** 剪映草稿导出参数。 */
+export interface JianyingDraftOptions {
+  script: string;
+  videoPath: string;
+  rangeStart: number;
+  rangeEnd: number;
+}

@@ -980,7 +980,10 @@ pub async fn submit_film_script_gen(
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_film_analysis(state: State<'_, AppState>, project_id: String) -> Result<Option<String>, String> {
-    db::film_project_get_analysis(&state.pool, &project_id).await
+    let r = db::film_project_get_analysis(&state.pool, &project_id).await;
+    let len = match &r { Ok(Some(s)) => s.len(), _ => 0 };
+    eprintln!("[get_film_analysis] project_id={project_id} report_len={len}");
+    r
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1018,4 +1021,300 @@ pub async fn submit_film_video_analysis(
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_video_server_url(state: State<'_, AppState>) -> String {
     format!("http://127.0.0.1:{}", state.video_server_port)
+}
+
+// ===========================================================================
+// 分镜工作台：音色库 / 批量配音 / 翻译 / 剪映草稿
+// ===========================================================================
+
+/// 拉取可用音色列表（XiaomiMimo /audio/voices，OpenAI 兼容）。失败时返回内置 fallback。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn voice_list(
+    state: State<'_, AppState>,
+    client: State<'_, Client>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let row = db::get_by_kind(&state.pool, "tts").await?;
+    let key = match cred::get_key(&state.pool, "tts").await {
+        Ok(Some(k)) if !k.is_empty() => k,
+        _ => {
+            // 无 Key 时回退一组内置候选（与前端 VOICE_FALLBACK 一致）
+            return Ok(serde_json::json!([
+                { "id": "default", "name": "默认（系统音色）" },
+                { "id": "male_calm", "name": "磁性男声 · 沉稳" },
+                { "id": "male_warm", "name": "温暖男声 · 亲切" },
+                { "id": "female_lively", "name": "知性女声 · 活力" },
+                { "id": "female_news", "name": "标准女声 · 新闻" },
+                { "id": "narrator", "name": "旁白男声 · 纪录片" }
+            ]).as_array().cloned().unwrap_or_default());
+        }
+    };
+    let base = row.base_url.trim_end_matches('/');
+    let url = format!("{base}/audio/voices");
+    let resp = client
+        .get(&url)
+        .bearer_auth(&key)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("列音色失败: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("音色列表 HTTP {}", resp.status()));
+    }
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    // 兼容多种返回结构：直接数组 / {voices:[]} / {data:[]}
+    let arr = v.as_array()
+        .cloned()
+        .or_else(|| v.get("voices").and_then(|x| x.as_array()).cloned())
+        .or_else(|| v.get("data").and_then(|x| x.as_array()).cloned())
+        .unwrap_or_default();
+    // 规整为 [{id, name, gender?, language?}]
+    let out: Vec<serde_json::Value> = arr.into_iter().filter_map(|x| {
+        let id = x.get("id").or_else(|| x.get("voice")).or_else(|| x.get("name"))?.as_str()?.to_string();
+        let name = x.get("name").and_then(|x| x.as_str()).map(|s| s.to_string()).unwrap_or_else(|| id.clone());
+        Some(serde_json::json!({
+            "id": id,
+            "name": name,
+            "gender": x.get("gender").and_then(|x| x.as_str()),
+            "language": x.get("language").and_then(|x| x.as_str()),
+        }))
+    }).collect();
+    Ok(out)
+}
+
+/// 批量配音（按 segments 调用 XiaomiMimo TTS 生成 wav，写入 data/dub/<project>/seg_<i>.wav，
+/// 经 Channel 推送每段 status=done|failed + url）。完成后 emit done。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn batch_dub(
+    state: State<'_, AppState>,
+    project_id: String,
+    segments: String,
+    on_progress: Channel<ProgressMsg>,
+) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    db::task_create(&state.pool, &id, "batch_dub", Some(&project_id)).await?;
+    let job = TaskJob {
+        id: id.clone(),
+        kind: "batch_dub".into(),
+        project_id: Some(project_id.clone()),
+        payload: serde_json::json!({
+            "projectId": project_id,
+            "segments": segments,
+        }),
+        channel: on_progress,
+    };
+    state.task_tx.send(job).await.map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+/// 翻译整段解说文案到目标语言（zh/en/ja），调 LLM。返回 {index, text} 数组。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn translate_script(
+    state: State<'_, AppState>,
+    project_id: String,
+    language: String,
+    segments: String,
+) -> Result<String, String> {
+    let segs: Vec<serde_json::Value> = serde_json::from_str(&segments).map_err(|e| format!("segments JSON 解析失败: {e}"))?;
+    let (base_url, model, key) = match tasks::llm_provider(&state.pool).await {
+        Ok(b) => b,
+        Err(e) => return Err(format!("未配置文本大模型：{e}")),
+    };
+    let _ = project_id; // 暂不落库
+    let items: Vec<serde_json::Value> = segs.iter().enumerate().map(|(i, s)| serde_json::json!({
+        "index": s.get("index").and_then(|x| x.as_u64()).unwrap_or(i as u64),
+        "section": s.get("section").and_then(|t| t.as_str()).unwrap_or(""),
+        "text": s.get("text").and_then(|t| t.as_str()).unwrap_or(""),
+    })).collect();
+    let prompt = format!(
+        "你是专业影视翻译。请把以下解说逐段翻译为{}{}，严格原样返回 JSON 数组，每项 {{\"index\":<原 index 整数>,\"text\":<译后文本>}}。严禁遗漏、合并、改写或补充：\n{}",
+        language,
+        match language.as_str() { "zh" => "（简体）", "en" => "（English）", "ja" => "（日本語）", _ => "" },
+        serde_json::to_string(&serde_json::json!({ "items": items })).unwrap_or_default(),
+    );
+    let out = tasks::run_llm_text(&state.client, &base_url, &model, &key, &prompt).await?;
+    // 解析：可能包在 markdown 代码块中，先剥离 ```json … ```
+    let core = out.trim();
+    let core = if core.starts_with("```") {
+        if let Some(p) = core.find('\n') { &core[p + 1..] } else { core }
+    } else { core };
+    let core = core.trim_end_matches("```").trim();
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(core).map_err(|e| format!("LLM 返回非 JSON: {e}；raw={}", &core.chars().take(200).collect::<String>()))?;
+    let _ = project_id; // 暂不落库
+    Ok(serde_json::to_string(&parsed).unwrap_or_else(|_| "[]".into()))
+}
+
+/// 导出剪映草稿：生成 JianyingPro/Drafts/<project>_<ts>/draft_content.json + draft_meta_info.json + draft_extra_info.json + 素材副本。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn film_jianying_draft(
+    state: State<'_, AppState>,
+    project_id: String,
+    script: String,
+    video_path: String,
+    range_start: f64,
+    range_end: f64,
+    on_progress: Channel<ProgressMsg>,
+) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    db::task_create(&state.pool, &id, "film_jianying_draft", Some(&project_id)).await?;
+    let job = TaskJob {
+        id: id.clone(),
+        kind: "film_jianying_draft".into(),
+        project_id: Some(project_id.clone()),
+        payload: serde_json::json!({
+            "projectId": project_id,
+            "script": script,
+            "videoPath": video_path,
+            "rangeStart": range_start,
+            "rangeEnd": range_end,
+        }),
+        channel: on_progress,
+    };
+    state.task_tx.send(job).await.map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+/// 导入字幕（SRT/VTT/JSON）。同步返回解析结果。
+/// SRT 格式：
+///   <index>\n<hh:mm:ss,mmm> --> <hh:mm:ss,mmm>\n<text...>\n
+/// JSON 格式：[{"start":float,"end":float,"text":"..."}, ...]
+#[tauri::command(rename_all = "camelCase")]
+pub async fn import_script(file_path: String) -> Result<String, String> {
+    let raw = std::fs::read_to_string(&file_path).map_err(|e| format!("读取字幕失败：{e}"))?;
+    let lower = file_path.to_lowercase();
+    let segments: Vec<serde_json::Value> = if lower.ends_with(".json") {
+        serde_json::from_str::<Vec<serde_json::Value>>(&raw)
+            .map_err(|e| format!("JSON 解析失败：{e}"))?
+    } else {
+        // 默认按 SRT 解析（VTT 类似，仅 ignore "WEBVTT" 头）
+        let cleaned = raw.replace("WEBVTT", "").replace("\r\n", "\n");
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        for block in cleaned.split("\n\n") {
+            let lines: Vec<&str> = block.lines().filter(|l| !l.trim().is_empty()).collect();
+            if lines.is_empty() { continue; }
+            // 找带 "-->" 的时间行
+            let mut time_line_idx = None;
+            for (i, l) in lines.iter().enumerate() {
+                if l.contains("-->") { time_line_idx = Some(i); break; }
+            }
+            let Some(idx) = time_line_idx else { continue; };
+            let tl = lines[idx];
+            let ts: Vec<&str> = tl.split("-->").collect();
+            if ts.len() != 2 { continue; }
+            let parse_ts = |s: &str| -> Option<f64> {
+                // 支持 hh:mm:ss.mmm 或 hh:mm:ss,mmm 或 mm:ss.mmm
+                let s = s.trim();
+                let s = s.replace(',', ".");
+                let parts: Vec<&str> = s.split(':').collect();
+                match parts.len() {
+                    3 => {
+                        let h: f64 = parts[0].parse().ok()?;
+                        let m: f64 = parts[1].parse().ok()?;
+                        let ss: f64 = parts[2].parse().ok()?;
+                        Some(h * 3600.0 + m * 60.0 + ss)
+                    }
+                    2 => {
+                        let m: f64 = parts[0].parse().ok()?;
+                        let ss: f64 = parts[1].parse().ok()?;
+                        Some(m * 60.0 + ss)
+                    }
+                    _ => None,
+                }
+            };
+            let start = match parse_ts(ts[0]) { Some(v) => v, None => continue };
+            let end = match parse_ts(ts[1]) { Some(v) => v, None => continue };
+            let text = lines.iter().skip(idx + 1).map(|s| *s).collect::<Vec<_>>().join("\n").trim().to_string();
+            if text.is_empty() { continue; }
+            out.push(serde_json::json!({ "start": start, "end": end, "text": text }));
+        }
+        out
+    };
+    Ok(serde_json::to_string(&serde_json::json!({ "segments": segments })).unwrap_or_else(|_| "{\"segments\":[]}".into()))
+}
+
+/// 导入配音：调用 transcribe_local 对 wav/mp3 整体转写。
+/// 同步阻塞（Python 子进程）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn import_audio_dub(
+    _state: State<'_, AppState>,
+    _project_id: String,
+    file_path: String,
+) -> Result<String, String> {
+    if !std::path::Path::new(&file_path).exists() { return Err(format!("音频不存在：{file_path}")); }
+    let (segs, _lang, _dur, _deg, reason) = tasks::transcribe_local(&file_path).await;
+    if segs.is_empty() {
+        return Err(format!("本地转写失败：{reason}"));
+    }
+    Ok(serde_json::to_string(&serde_json::json!({ "segments": segs.iter().map(|s| serde_json::json!({ "start": s.start, "end": s.end, "text": s.text })).collect::<Vec<_>>() })).unwrap_or_else(|_| "{\"segments\":[]}".into()))
+}
+
+/// 导出 Premiere：生成 data_dir/premier_drafts/<project>_<ts>/{project}.edl + .timeline.json + subtitles.srt。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn film_premiere_export(
+    state: State<'_, AppState>,
+    project_id: String,
+    script: String,
+    video_path: String,
+    range_start: f64,
+    range_end: f64,
+    follow_original: bool,
+    flower_text: bool,
+    strict_align: bool,
+    on_progress: Channel<ProgressMsg>,
+) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    db::task_create(&state.pool, &id, "film_premiere_export", Some(&project_id)).await?;
+    let job = TaskJob {
+        id: id.clone(),
+        kind: "film_premiere_export".into(),
+        project_id: Some(project_id.clone()),
+        payload: serde_json::json!({
+            "projectId": project_id,
+            "script": script,
+            "videoPath": video_path,
+            "rangeStart": range_start,
+            "rangeEnd": range_end,
+            "followOriginal": follow_original,
+            "flowerText": flower_text,
+            "strictAlign": strict_align,
+        }),
+        channel: on_progress,
+    };
+    state.task_tx.send(job).await.map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+/// 导出国际剪映（CapCut 兼容）：同 jianying draft 路径，但 media path 用绝对路径 + 国际字段。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn film_jianying_draft_intl(
+    state: State<'_, AppState>,
+    project_id: String,
+    script: String,
+    video_path: String,
+    range_start: f64,
+    range_end: f64,
+    follow_original: bool,
+    flower_text: bool,
+    strict_align: bool,
+    on_progress: Channel<ProgressMsg>,
+) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    db::task_create(&state.pool, &id, "film_jianying_draft_intl", Some(&project_id)).await?;
+    let job = TaskJob {
+        id: id.clone(),
+        kind: "film_jianying_draft_intl".into(),
+        project_id: Some(project_id.clone()),
+        payload: serde_json::json!({
+            "projectId": project_id,
+            "script": script,
+            "videoPath": video_path,
+            "rangeStart": range_start,
+            "rangeEnd": range_end,
+            "followOriginal": follow_original,
+            "flowerText": flower_text,
+            "strictAlign": strict_align,
+        }),
+        channel: on_progress,
+    };
+    state.task_tx.send(job).await.map_err(|e| e.to_string())?;
+    Ok(id)
 }
