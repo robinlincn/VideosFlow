@@ -512,6 +512,7 @@ export async function submitFilmScriptGen(
     voiceId: opts.voiceId ?? '',
     subtitleStyle: opts.subtitleStyle ?? '',
     analysis: opts.analysis ?? '',
+    rolePrompt: opts.rolePrompt ?? '',
     onProgress: ch,
   });
 }

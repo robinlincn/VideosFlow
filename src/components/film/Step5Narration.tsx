@@ -48,6 +48,9 @@ export default function Step5Narration({
 }: Props) {
   const { state, actions } = useApp();
   const { settingsState } = state;
+  // 从设置「提示词模板」中取名为「角色设定」的模板内容，作为解说生成的角色身份/口吻基准
+  const rolePrompt = Object.values(settingsState.prompts || {})
+    .find((p) => (p.name || '').trim() === '角色设定')?.body?.trim() || '';
   const [mode, setMode] = useState<'ai' | 'custom' | 'imitate'>('ai');
   const [style, setStyle] = useState(styleId); // 默认从步骤 2 带来的风格
   const [view, setView] = useState<'first' | 'third'>('third');
@@ -151,6 +154,7 @@ export default function Step5Narration({
         voiceId,
         subtitleStyle,
         analysis: report,
+        rolePrompt,
       };
       setTaskPct(0);
       setTaskMsg('生成解说文案');
@@ -500,9 +504,9 @@ interface ScriptSegment {
 function parseScriptSegments(script: string): ScriptSegment[] {
   const lines = script.split('\n').filter((l) => l.trim());
   const segments: ScriptSegment[] = [];
-  // 匹配 [section] start-end dialogue 或 start-end dialogue
-  const re = /^\[([^\]]+)\]\s+(\S+?)-(\S+?)\s+(.+)$/;   // 带段落标签
-  const rePlain = /^(\S+?)-(\S+?)\s*(.+)$/;               // 无段落标签
+  // 匹配 [section] start-end dialogue 或 start-end dialogue（容忍分隔符两侧空格）
+  const re = /^\[([^\]]+)\]\s+(\S+)\s*-\s*(\S+)\s+(.+)$/;   // 带段落标签
+  const rePlain = /^(\S+)\s*-\s*(\S+)\s+(.+)$/;             // 无段落标签
   for (const line of lines) {
     const m = line.match(re);
     if (m) {

@@ -223,6 +223,7 @@ export interface FilmScriptGenOptions {
   voiceId?: string;     // 语音克隆：知性女声 / 磁性男声 / 温暖男声
   subtitleStyle?: string; // 字幕样式
   analysis?: string;    // M2.6：影片视频分析结果（markdown），与所选参数共同驱动解说文案生成
+  rolePrompt?: string;  // 设置中「角色设定」提示词模板内容，作为解说生成的角色身份/口吻基准
 }
 
 // ---------------------------------------------------------------------------

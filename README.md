@@ -449,6 +449,11 @@ npm run tauri:dev
 - **修复**：前端 `Step5Narration.tsx` 新增 `parseScriptSegments()` 解析器（正则匹配 `[段落] start-end dialogue`）；结果区改为**分段卡片列表**，每张卡片含「段落标签 + 时间节点 badge + 解说词正文」，`global.css` 新增 `.film-step5__seg*` 卡片样式（hover 高亮）。`split_script_to_sections` 降级路径输出也统一带 `[section] start-end` 格式，所有路径均带时间标记。
 - **繁→简兜底**：新增 `python-sidecar/to_simplified.py`（opencc t2s，未装则原样返回）对 LLM/ASR 最终文案兜底，统一简体中文。
 
+### 5. 角色设定提示词接入（续9，2026-07-15）
+- **需求澄清**：ASR 原声转写往往不完整、只能作内容参考；解说文案应以「多模态大模型看画面识别」+「设置中提示词模板 name='角色设定' 的内容」+「选定的解说风格」三者结合，生成贴合画面、带时间节点的新解说文案。
+- **实现**：前端 `Step5Narration` / `NarrationFlowModal` 从 `settingsState.prompts` 取 `name==='角色设定'` 的模板 `body`，作为 `rolePrompt` 经 `submitFilmScriptGen` 全链路透传（`types.ts` / `providers.ts` / `commands.rs` 增 `role_prompt`）；后端 `NarrationConfig` 增 `role_prompt` 字段，`build_narration_prompt` 在标题前注入「角色设定」块（身份/口吻基准，要求全程遵循），`run_film_script_gen` 从 payload 读取并透传。用户未建该模板时降级不注入。
+- **验证**：`cargo test --lib tasks` 9 passed（新增「角色设定注入」测试：非空注入、空不注入）；`cargo check` / `tsc --noEmit` / `npm run build` 全绿。
+
 ### 验证
 - `cargo check` / `tsc --noEmit` / `npm run build` 全绿；`cargo test --lib tasks` **5 passed**（含场景节点提取/对齐/回退解析）。
 - `film_projects` 表新增 `analysis` 列并兼容旧库（`ALTER TABLE ... ADD COLUMN` 幂等补列）；`lib.rs` 注册 `submit_film_video_analysis` / `get_film_analysis` 命令。

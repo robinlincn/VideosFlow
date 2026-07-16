@@ -41,6 +41,10 @@ const STYLES = [
 
 export default function NarrationFlowModal({ open: isOpen, onClose, onComplete }: Props) {
   const { state, actions } = useApp();
+  const { settingsState } = state;
+  // 从设置「提示词模板」中取名为「角色设定」的模板内容，作为解说生成的角色身份/口吻基准
+  const rolePrompt = Object.values(settingsState.prompts || {})
+    .find((p) => (p.name || '').trim() === '角色设定')?.body?.trim() || '';
   const { editingProj } = state;
   const [currentStep, setCurrentStep] = useState<Step>(1);
   const [videoPath, setVideoPath] = useState<string>('');
@@ -113,6 +117,7 @@ export default function NarrationFlowModal({ open: isOpen, onClose, onComplete }
         language: 'zh',
         duration: 180,
         hint: '',
+        rolePrompt,
       }, (m: ProgressMsg) => {
         setTaskPct(m.progress);
         setTaskMsg(m.message || '');

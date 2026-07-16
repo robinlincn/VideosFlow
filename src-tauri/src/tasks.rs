@@ -2477,10 +2477,41 @@ pub fn split_script_to_sections(
     // 目标段数：3-8 区间；六段式标签（不足时循环取）
     let n = target_segments.clamp(3, 8);
     let section_labels = ["开端", "铺垫", "冲突", "高潮", "反转", "结局"];
-    let per_seg = (raw_sentences.len() + n - 1) / n;
     let total_duration = if total_duration > 0.0 { total_duration } else { (n as f64) * 60.0 };
 
+    // ASR 整段无标点（如本地 ASR 仅返回整段）：按字数均分到 n 段，避免后续段为空
     let mut out: Vec<db::TimelineClip> = Vec::new();
+    if raw_sentences.len() <= 1 {
+        let full = asr_text.trim();
+        if !full.is_empty() {
+            let chars: Vec<char> = full.chars().collect();
+            let per = (chars.len() + n - 1) / n;
+            for i in 0..n {
+                let s = i * per;
+                let e = ((i + 1) * per).min(chars.len());
+                let body: String = chars[s..e].iter().collect();
+                let start = (i as f64 / n as f64) * total_duration;
+                let end = ((i + 1) as f64 / n as f64) * total_duration;
+                let sec_label = section_labels.get(i % section_labels.len()).copied().unwrap_or("");
+                let text = format!("[{}] {}-{} {}", sec_label, fmt_ts(start), fmt_ts(end), body);
+                out.push(db::TimelineClip {
+                    id: format!("s{i}"),
+                    source: "narration".into(),
+                    timeline_start: start,
+                    timeline_end: end,
+                    src_start: start,
+                    src_end: end,
+                    label: sec_label.to_string(),
+                    text,
+                    flower: String::new(),
+                    transition: "none".into(),
+                });
+            }
+        }
+        return out;
+    }
+
+    let per_seg = (raw_sentences.len() + n - 1) / n;
     for i in 0..n {
         let s_idx = i * per_seg;
         let e_idx = ((i + 1) * per_seg).min(raw_sentences.len());
@@ -2529,6 +2560,8 @@ pub struct NarrationConfig<'a> {
     pub asr_failed: bool,
     /** M2.6：影片视频分析结果（来自多模态大模型），作为内容理解核心依据，与所选参数共同驱动解说文案生成 */
     pub analysis: &'a str,
+    /** 设置「角色设定」提示词模板内容，作为解说生成的角色身份/口吻基准（前端从 prompts 取 name='角色设定' 传入） */
+    pub role_prompt: &'a str,
     /** M2.6：真实画面时间节点列表（来自场景检测/语义块，`1. 0:00-0:12` 逐行），字幕据此与画面对齐 */
     pub scene_nodes: &'a str,
 }
@@ -2704,6 +2737,15 @@ pub fn build_narration_prompt(cfg: &NarrationConfig) -> String {
     } else {
         format!("视频语音内容参考（来自 ASR，可能不完整，仅作内容理解参考，不要照抄）：\n{}", cfg.asr_text)
     };
+    // 设置「角色设定」：作为解说生成的角色身份/口吻基准，全程遵循
+    let role_block = if !cfg.role_prompt.trim().is_empty() {
+        format!(
+            "角色设定（你在此视频解说中的身份、口吻与表达基准，须全程遵循，不得偏离）：\n{}\n",
+            cfg.role_prompt.trim()
+        )
+    } else {
+        String::new()
+    };
     // M2.6：真实画面时间节点（来自场景检测/语义块）——字幕据此与画面对齐
     let has_nodes = cfg.scene_nodes.trim().len() > 0 && cfg.scene_nodes.lines().count() >= 2;
     let nodes_block = if has_nodes {
@@ -2728,6 +2770,7 @@ pub fn build_narration_prompt(cfg: &NarrationConfig) -> String {
         .join("\n");
     format!(
         r#"请为以下视频撰写一段时长约 {d} 分钟、与画面严格对齐的解说字幕（每条字幕对应一个画面时间区间）。
+{role_block}
 视频标题：{title}
 写作风格：{style_hint}
 {lang_hint}
@@ -2760,6 +2803,7 @@ pub fn build_narration_prompt(cfg: &NarrationConfig) -> String {
         analysis_block = analysis_block,
         nodes_block = nodes_block,
         asr_block = asr_block,
+        role_block = role_block,
         timeline_req = timeline_req,
         simp_req = simp_req,
     )
@@ -2788,7 +2832,15 @@ pub fn parse_narration_response(llm_text: &str, total_duration: f64, style: &str
     for (i, item) in items.iter().enumerate() {
         let start_str = item.get("start").and_then(|v| v.as_str()).unwrap_or("0:00");
         let end_str = item.get("end").and_then(|v| v.as_str()).unwrap_or("0:30");
-        let dialogue = item.get("dialogue").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        // 兼容 dialogue / text / content 三种字段名（部分小模型不返回 dialogue）
+        let dialogue = item
+            .get("dialogue")
+            .or_else(|| item.get("text"))
+            .or_else(|| item.get("content"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let section = item.get("section").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
 
         let start_sec = parse_timestamp(start_str);
@@ -2818,6 +2870,147 @@ pub fn parse_narration_response(llm_text: &str, total_duration: f64, style: &str
     }
     let _ = (total_duration, style); // 抑制 unused 警告
     Ok(shots)
+}
+
+/// 六段式段落标签
+const NARRATION_SECTIONS: &[&str] = &["开端", "铺垫", "冲突", "高潮", "反转", "结局"];
+
+/// 解析单行字幕：`[段落] start-end 文案` 或 `start-end 文案`
+/// 返回 (section, start_ts, end_ts, dialogue)；无法识别返回 None
+fn parse_one_clip_line(line: &str) -> Option<(String, String, String, String)> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let mut section = String::new();
+    let mut rest = line;
+    if let Some(stripped) = line.strip_prefix('[') {
+        if let Some(close) = stripped.find(']') {
+            section = stripped[..close].trim().to_string();
+            rest = stripped[close + 1..].trim();
+        }
+    }
+    let toks: Vec<&str> = rest.split_whitespace().collect();
+    for (i, t) in toks.iter().enumerate() {
+        if *t == "-" && i >= 1 && i + 1 < toks.len() {
+            let start = toks[i - 1];
+            let end = toks[i + 1];
+            if start.contains(':') && end.contains(':') {
+                let dialogue = toks[i + 2..].join(" ");
+                return Some((section, start.to_string(), end.to_string(), dialogue));
+            }
+        }
+    }
+    None
+}
+
+/// 把纯文本切成多个语义块（用于 LLM 返回非 JSON 的兜底）：
+/// 优先按空行，其次按换行，最后按句号每 2 句一组
+fn split_into_blocks(text: &str) -> Vec<String> {
+    let by_blank: Vec<String> = text
+        .split("\n\n")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if by_blank.len() >= 2 {
+        return by_blank;
+    }
+    let by_line: Vec<String> = text
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if by_line.len() >= 2 {
+        return by_line;
+    }
+    let sentences: Vec<&str> = text
+        .split(|c: char| "。！？!?.".contains(c))
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if sentences.len() >= 2 {
+        let per = 2usize;
+        let mut blocks = Vec::new();
+        for chunk in sentences.chunks(per) {
+            blocks.push(chunk.join("。"));
+        }
+        return blocks;
+    }
+    Vec::new()
+}
+
+/// M2.5：当 LLM 未返回规范 JSON 时，从其原文恢复多段解说结构。
+/// ① 提取带 `[段落] start-end 文案` / `start-end 文案` 的行；
+/// ② 否则把纯分段文本（空行/换行/句子）按总时长均分时间。
+/// 返回空表示完全无法恢复（上层再用 ASR 切分兜底）。
+pub fn recover_narration_segments(llm_text: &str, total_duration: f64) -> Vec<db::TimelineClip> {
+    let dur = if total_duration > 0.0 { total_duration } else { 180.0 };
+
+    // 1) 提取带时间标签的行
+    let mut tagged: Vec<(String, String, String, String)> = Vec::new();
+    for line in llm_text.lines() {
+        if let Some(c) = parse_one_clip_line(line) {
+            tagged.push(c);
+        }
+    }
+    if !tagged.is_empty() {
+        return tagged
+            .into_iter()
+            .enumerate()
+            .map(|(i, (section, start, end, dialogue))| {
+                let start_sec = parse_timestamp(&start);
+                let end_sec = parse_timestamp(&end);
+                let label = if section.is_empty() {
+                    NARRATION_SECTIONS[i % NARRATION_SECTIONS.len()].to_string()
+                } else {
+                    section.clone()
+                };
+                let text = format!("[{}] {}-{} {}", label, start, end, dialogue.trim());
+                db::TimelineClip {
+                    id: format!("s{i}"),
+                    source: "narration".into(),
+                    timeline_start: start_sec,
+                    timeline_end: end_sec,
+                    src_start: start_sec,
+                    src_end: end_sec,
+                    label,
+                    text,
+                    flower: String::new(),
+                    transition: "none".into(),
+                }
+            })
+            .collect();
+    }
+
+    // 2) 纯分段文本：按块均分时间
+    let blocks = split_into_blocks(llm_text);
+    if blocks.len() >= 2 {
+        let n = blocks.len();
+        return blocks
+            .into_iter()
+            .enumerate()
+            .map(|(i, body)| {
+                let start = (i as f64 / n as f64) * dur;
+                let end = ((i + 1) as f64 / n as f64) * dur;
+                let label = NARRATION_SECTIONS[i % NARRATION_SECTIONS.len()].to_string();
+                let text = format!("[{}] {}-{} {}", label, fmt_ts(start), fmt_ts(end), body.trim());
+                db::TimelineClip {
+                    id: format!("s{i}"),
+                    source: "narration".into(),
+                    timeline_start: start,
+                    timeline_end: end,
+                    src_start: start,
+                    src_end: end,
+                    label,
+                    text,
+                    flower: String::new(),
+                    transition: "none".into(),
+                }
+            })
+            .collect();
+    }
+
+    Vec::new()
 }
 
 /// mm:ss → 秒
@@ -2863,6 +3056,7 @@ async fn run_film_script_gen(
     let voice_id = job.payload.get("voiceId").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let subtitle_style = job.payload.get("subtitleStyle").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let analysis = job.payload.get("analysis").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let role_prompt = job.payload.get("role_prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let mut asr_failed = false;
     let mut asr_reason = String::new();
 
@@ -2951,6 +3145,7 @@ async fn run_film_script_gen(
                     asr_text: &asr_text,
                     asr_failed,
                     analysis: &analysis,
+                    role_prompt: &role_prompt,
                     scene_nodes: &scene_nodes,
                 };
                 let prompt = build_narration_prompt(&cfg);
@@ -2963,8 +3158,14 @@ async fn run_film_script_gen(
                                 s
                             }
                             Err(_e) => {
-                                // 降级 2：LLM 返回非 JSON，用 pre_sections
-                                pre_sections.iter().map(|x| x.text.clone()).collect::<Vec<_>>().join("\n")
+                                // 降级 2a：优先从 LLM 原文恢复多段结构（本地小模型常返回带标签文本而非 JSON）
+                                let recovered = recover_narration_segments(&text, duration as f64);
+                                if !recovered.is_empty() {
+                                    recovered.iter().map(|x| x.text.clone()).collect::<Vec<_>>().join("\n")
+                                } else {
+                                    // 降级 2b：用 ASR 切分兜底
+                                    pre_sections.iter().map(|x| x.text.clone()).collect::<Vec<_>>().join("\n")
+                                }
                             }
                         }
                     }
@@ -3342,6 +3543,7 @@ mod tests {
             asr_text: "这是参考语音",
             asr_failed: false,
             analysis: "",
+            role_prompt: "",
             scene_nodes: "",
         };
         let p = build_narration_prompt(&cfg);
@@ -3370,6 +3572,7 @@ mod tests {
             asr_text: "参考",
             asr_failed: false,
             analysis: "影片理解……",
+            role_prompt: "",
             scene_nodes: "1. 0:00-0:12\n2. 0:12-0:25\n3. 0:25-0:40",
         };
         let p = build_narration_prompt(&cfg);
@@ -3377,6 +3580,53 @@ mod tests {
         assert!(p.contains("0:12-0:25"), "提示词应内联真实节点");
         assert!(p.contains("严格按上方"), "有节点时应要求严格对齐画面切换点");
         assert!(!p.contains("均匀分布"), "有节点时不应再要求均匀分布");
+    }
+
+    #[test]
+    fn narration_prompt_injects_role_setting_when_provided() {
+        let cfg = NarrationConfig {
+            title: "测试视频",
+            style: "movie",
+            style_name: "",
+            view: "third",
+            language: "zh",
+            duration_min: 1,
+            hint: "",
+            model: "default",
+            analysis_mode: 0.0,
+            voice_id: "",
+            subtitle_style: "",
+            asr_text: "",
+            asr_failed: false,
+            analysis: "",
+            role_prompt: "你是一位毒舌但专业的电影解说人，说话犀利、爱用反问",
+            scene_nodes: "",
+        };
+        let p = build_narration_prompt(&cfg);
+        assert!(p.contains("角色设定"), "有角色设定时提示词应含角色设定块");
+        assert!(p.contains("毒舌但专业的电影解说人"), "提示词应内联角色设定内容");
+
+        // 空角色设定时不注入
+        let cfg2 = NarrationConfig {
+            title: "测试视频",
+            style: "movie",
+            style_name: "",
+            view: "third",
+            language: "zh",
+            duration_min: 1,
+            hint: "",
+            model: "default",
+            analysis_mode: 0.0,
+            voice_id: "",
+            subtitle_style: "",
+            asr_text: "",
+            asr_failed: false,
+            analysis: "",
+            role_prompt: "",
+            scene_nodes: "",
+        };
+        let p2 = build_narration_prompt(&cfg2);
+        assert!(!p2.contains("角色设定"), "空角色设定时不应注入角色设定块");
     }
 
     #[test]
@@ -3413,5 +3663,41 @@ mod tests {
         assert_eq!(shots[0].timeline_start, 0.0);
         assert_eq!(shots[0].timeline_end, 30.0);
         assert_eq!(shots[1].timeline_end, 60.0);
+    }
+
+    #[test]
+    fn recover_narration_segments_from_tagged_text() {
+        // 本地小模型常返回带 [段落] 标签的自然语言而非规范 JSON
+        let text = "[开端] 0:00-0:20 这是第一段解说内容。\n[铺垫] 0:20-0:40 这是第二段。\n[冲突] 0:40-1:00 这是第三段。";
+        let clips = recover_narration_segments(text, 60.0);
+        assert_eq!(clips.len(), 3, "带标签文本应恢复为多段");
+        assert_eq!(clips[0].label, "开端");
+        assert_eq!(clips[1].label, "铺垫");
+        assert_eq!(clips[2].label, "冲突");
+        assert!(!clips[0].text.is_empty());
+        assert!(!clips[1].text.is_empty(), "后续段不应为空");
+        assert!(!clips[2].text.is_empty(), "后续段不应为空");
+        assert!(clips[1].text.contains("第二段"));
+        assert!(clips[2].text.contains("第三段"));
+    }
+
+    #[test]
+    fn recover_narration_segments_from_plain_blocks() {
+        // 纯分段文本（无时间标签）也应按块恢复多段
+        let text = "第一段解说内容在这里。\n\n第二段解说内容在这里。\n\n第三段解说内容在这里。";
+        let clips = recover_narration_segments(text, 60.0);
+        assert_eq!(clips.len(), 3, "纯分段文本应恢复为多段");
+        assert!(clips[1].text.contains("第二段"));
+    }
+
+    #[test]
+    fn split_script_to_sections_distributes_unpunctuated_asr() {
+        // 本地 ASR 仅返回整段无标点文本时，n 段都应分到内容，而非只第一段
+        let asr = "这是一段没有任何断句标点的整段转写内容需要被均分到多个段落";
+        let clips = split_script_to_sections(asr, 60.0, 3);
+        assert_eq!(clips.len(), 3);
+        assert!(!clips[0].text.is_empty());
+        assert!(!clips[1].text.is_empty(), "无标点整段不应只填第一段");
+        assert!(!clips[2].text.is_empty(), "无标点整段不应只填第一段");
     }
 }

@@ -945,6 +945,7 @@ pub async fn submit_film_script_gen(
     voice_id: String,
     subtitle_style: String,
     analysis: Option<String>,
+    role_prompt: Option<String>,
     on_progress: Channel<ProgressMsg>,
 ) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
@@ -969,6 +970,7 @@ pub async fn submit_film_script_gen(
             "voiceId": voice_id,
             "subtitleStyle": subtitle_style,
             "analysis": analysis.unwrap_or_default(),
+            "role_prompt": role_prompt.unwrap_or_default(),
         }),
         channel: on_progress,
     };
