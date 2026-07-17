@@ -305,4 +305,23 @@ export interface JianyingDraftOptions {
   videoPath: string;
   rangeStart: number;
   rangeEnd: number;
+  /** 指定导出文件夹（绝对路径）；不传则回退默认 data_dir 位置。 */
+  outDir?: string;
+}
+
+/** 合成/预览/导出成片的公共参数（源视频 + 分段配音 + 烧录字幕）。 */
+export interface FilmCompositeOptions {
+  script: string;
+  videoPath: string;
+  mixVoice: boolean;
+  subtitleStyle: string;
+  /** 指定导出文件夹（绝对路径）；不传则回退默认 data_dir 位置。 */
+  outDir?: string;
+}
+
+/** 导出 SRT 参数：字幕文本 + 目标文件夹。 */
+export interface FilmSrtExportOptions {
+  content: string;
+  /** 指定导出文件夹（绝对路径）；不传则回退默认 data_dir/export。 */
+  outDir?: string;
 }

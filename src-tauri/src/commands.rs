@@ -321,16 +321,18 @@ async fn test_asr(client: &Client, base: &str, model: &str, key: Option<&str>) -
     Ok("ok".into())
 }
 
-/// TTS 功能测试：用一句短文本真实请求一次 /audio/speech，校验返回音频字节。
+/// TTS 功能测试：用一句短文本真实请求一次 Chat Completions 协议，校验返回音频。
 async fn test_tts(client: &Client, base: &str, model: &str, key: Option<&str>) -> Result<String, String> {
     let key = key.ok_or("缺少 API Key，请先填写 Key 再测试 TTS")?;
     let body = serde_json::json!({
         "model": model,
-        "input": "你好。",
-        "voice": "default"
+        "messages": [ { "role": "assistant", "content": "你好。" } ],
+        "audio": { "format": "wav", "voice": "mimo_default" },
+        "stream": false,
     });
     let resp = client
-        .post(format!("{}/audio/speech", base.trim_end_matches('/')))
+        .post(format!("{}/chat/completions", base.trim_end_matches('/')))
+        .header("api-key", key)
         .bearer_auth(key)
         .json(&body)
         .timeout(Duration::from_secs(30))
@@ -345,9 +347,17 @@ async fn test_tts(client: &Client, base: &str, model: &str, key: Option<&str>) -
         let txt = resp.text().await.unwrap_or_default();
         return Err(format!("TTS 端点返回错误（HTTP {code}）：{txt}"));
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("TTS 响应读取失败：{e}"))?;
-    if bytes.is_empty() {
-        return Err("TTS 返回空音频，请确认模型/密钥是否支持 TTS".into());
+    let j: serde_json::Value = resp.json().await.map_err(|e| format!("TTS 响应解析失败：{e}"))?;
+    let has_audio = j
+        .get("choices").and_then(|c| c.get(0))
+        .and_then(|m| m.get("message"))
+        .and_then(|m| m.get("audio"))
+        .and_then(|a| a.get("data"))
+        .and_then(|d| d.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if !has_audio {
+        return Err("TTS 返回中缺少 audio.data，请确认模型/密钥是否支持 TTS".into());
     }
     Ok("ok".into())
 }
@@ -1152,6 +1162,7 @@ pub async fn film_jianying_draft(
     video_path: String,
     range_start: f64,
     range_end: f64,
+    out_dir: Option<String>,
     on_progress: Channel<ProgressMsg>,
 ) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
@@ -1166,6 +1177,7 @@ pub async fn film_jianying_draft(
             "videoPath": video_path,
             "rangeStart": range_start,
             "rangeEnd": range_end,
+            "outDir": out_dir,
         }),
         channel: on_progress,
     };
@@ -1259,6 +1271,7 @@ pub async fn film_premiere_export(
     follow_original: bool,
     flower_text: bool,
     strict_align: bool,
+    out_dir: Option<String>,
     on_progress: Channel<ProgressMsg>,
 ) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
@@ -1276,6 +1289,7 @@ pub async fn film_premiere_export(
             "followOriginal": follow_original,
             "flowerText": flower_text,
             "strictAlign": strict_align,
+            "outDir": out_dir,
         }),
         channel: on_progress,
     };
@@ -1295,6 +1309,7 @@ pub async fn film_jianying_draft_intl(
     follow_original: bool,
     flower_text: bool,
     strict_align: bool,
+    out_dir: Option<String>,
     on_progress: Channel<ProgressMsg>,
 ) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
@@ -1312,6 +1327,100 @@ pub async fn film_jianying_draft_intl(
             "followOriginal": follow_original,
             "flowerText": flower_text,
             "strictAlign": strict_align,
+            "outDir": out_dir,
+        }),
+        channel: on_progress,
+    };
+    state.task_tx.send(job).await.map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+/// 渲染预览成片：源视频 + 分段配音 + 烧录字幕 合成到 data_dir/preview/<safe>.mp4。
+/// payload 回传 { outPath }。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn film_render_preview(
+    state: State<'_, AppState>,
+    project_id: String,
+    script: String,
+    video_path: String,
+    mix_voice: bool,
+    subtitle_style: String,
+    out_dir: Option<String>,
+    on_progress: Channel<ProgressMsg>,
+) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    db::task_create(&state.pool, &id, "film_render_preview", Some(&project_id)).await?;
+    let job = TaskJob {
+        id: id.clone(),
+        kind: "film_render_preview".into(),
+        project_id: Some(project_id.clone()),
+        payload: serde_json::json!({
+            "projectId": project_id,
+            "script": script,
+            "videoPath": video_path,
+            "mixVoice": mix_voice,
+            "subtitleStyle": subtitle_style,
+            "outDir": out_dir,
+        }),
+        channel: on_progress,
+    };
+    state.task_tx.send(job).await.map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+/// 导出成片 MP4：与预览相同管线，但输出到 data_dir/export/<safe>_<ts>.mp4。
+/// payload 回传 { outPath }。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn film_export_final(
+    state: State<'_, AppState>,
+    project_id: String,
+    script: String,
+    video_path: String,
+    mix_voice: bool,
+    subtitle_style: String,
+    out_dir: Option<String>,
+    on_progress: Channel<ProgressMsg>,
+) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    db::task_create(&state.pool, &id, "film_export_final", Some(&project_id)).await?;
+    let job = TaskJob {
+        id: id.clone(),
+        kind: "film_export_final".into(),
+        project_id: Some(project_id.clone()),
+        payload: serde_json::json!({
+            "projectId": project_id,
+            "script": script,
+            "videoPath": video_path,
+            "mixVoice": mix_voice,
+            "subtitleStyle": subtitle_style,
+            "outDir": out_dir,
+        }),
+        channel: on_progress,
+    };
+    state.task_tx.send(job).await.map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+/// 导出 SRT：把前端生成好的字幕文本写入指定文件夹（outDir）下的 <project>.srt。
+/// payload 回传 { outPath }。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn film_export_srt(
+    state: State<'_, AppState>,
+    project_id: String,
+    content: String,
+    out_dir: Option<String>,
+    on_progress: Channel<ProgressMsg>,
+) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    db::task_create(&state.pool, &id, "film_export_srt", Some(&project_id)).await?;
+    let job = TaskJob {
+        id: id.clone(),
+        kind: "film_export_srt".into(),
+        project_id: Some(project_id.clone()),
+        payload: serde_json::json!({
+            "projectId": project_id,
+            "content": content,
+            "outDir": out_dir,
         }),
         channel: on_progress,
     };

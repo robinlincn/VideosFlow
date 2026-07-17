@@ -25,6 +25,8 @@ import type {
   DubSegment,
   TranslateRequest,
   JianyingDraftOptions,
+  FilmCompositeOptions,
+  FilmSrtExportOptions,
 } from './types';
 
 export type {
@@ -52,6 +54,8 @@ export type {
   DubSegment,
   TranslateRequest,
   JianyingDraftOptions,
+  FilmCompositeOptions,
+  FilmSrtExportOptions,
 } from './types';
 
 /** 读取全部 Provider 配置（含 hasKey 标记）。 */
@@ -642,6 +646,7 @@ export async function exportJianyingDraft(
     videoPath: opts.videoPath,
     rangeStart: opts.rangeStart,
     rangeEnd: opts.rangeEnd,
+    outDir: (opts.outDir as any) || null,
     onProgress: ch,
   });
   holdTaskChannel(taskId, ch);
@@ -688,7 +693,7 @@ export async function importAudioDub(projectId: string, filePath: string): Promi
 /** 导出 Premiere：生成 .edl + 时间线 JSON + 字幕 SRT 三件套到 data_dir/premier_drafts/<project>_<ts>/。★ Channel 引用防 GC */
 export async function exportPremiere(
   projectId: string,
-  opts: { script: string; videoPath: string; rangeStart: number; rangeEnd: number; followOriginal?: boolean; flowerText?: boolean; strictAlign?: boolean },
+  opts: { script: string; videoPath: string; rangeStart: number; rangeEnd: number; followOriginal?: boolean; flowerText?: boolean; strictAlign?: boolean; outDir?: string },
   onProgress: (m: ProgressMsg) => void,
 ): Promise<string> {
   const ch = createChannel(onProgress);
@@ -698,6 +703,7 @@ export async function exportPremiere(
     followOriginal: opts.followOriginal || false,
     flowerText: opts.flowerText || false,
     strictAlign: opts.strictAlign || false,
+    outDir: (opts.outDir as any) || null,
     onProgress: ch,
   });
   holdTaskChannel(taskId, ch);
@@ -717,6 +723,65 @@ export async function exportJianyingDraftIntl(
     followOriginal: opts.followOriginal || false,
     flowerText: opts.flowerText || false,
     strictAlign: opts.strictAlign || false,
+    outDir: (opts.outDir as any) || null,
+    onProgress: ch,
+  });
+  holdTaskChannel(taskId, ch);
+  return taskId;
+}
+
+/** 渲染预览成片：源视频 + 分段配音 + 烧录字幕 合成到 data_dir/preview/<safe>.mp4。
+ *  任务 done 时 payload.outPath 给出合成视频路径，前端用 fileserver 播放。★ Channel 引用防 GC */
+export async function filmRenderPreview(
+  projectId: string,
+  opts: FilmCompositeOptions,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  const taskId = await invoke<string>('film_render_preview', {
+    projectId,
+    script: opts.script,
+    videoPath: opts.videoPath,
+    mixVoice: opts.mixVoice,
+    subtitleStyle: opts.subtitleStyle,
+    outDir: (opts.outDir as any) || null,
+    onProgress: ch,
+  });
+  holdTaskChannel(taskId, ch);
+  return taskId;
+}
+
+/** 导出成片 MP4：与预览同一管线，输出到 data_dir/export/<safe>_<ts>.mp4。★ Channel 引用防 GC */
+export async function filmExportFinal(
+  projectId: string,
+  opts: FilmCompositeOptions,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  const taskId = await invoke<string>('film_export_final', {
+    projectId,
+    script: opts.script,
+    videoPath: opts.videoPath,
+    mixVoice: opts.mixVoice,
+    subtitleStyle: opts.subtitleStyle,
+    outDir: (opts.outDir as any) || null,
+    onProgress: ch,
+  });
+  holdTaskChannel(taskId, ch);
+  return taskId;
+}
+
+/** 导出 SRT：把字幕文本写入指定文件夹（outDir）下的 <project>.srt；未指定则回退默认 data_dir/export。★ Channel 引用防 GC */
+export async function filmExportSrt(
+  projectId: string,
+  opts: FilmSrtExportOptions,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  const taskId = await invoke<string>('film_export_srt', {
+    projectId,
+    content: opts.content,
+    outDir: (opts.outDir as any) || null,
     onProgress: ch,
   });
   holdTaskChannel(taskId, ch);

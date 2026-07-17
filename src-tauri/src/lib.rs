@@ -152,6 +152,9 @@ pub fn run() {
             commands::import_audio_dub,
             commands::film_premiere_export,
             commands::film_jianying_draft_intl,
+            commands::film_render_preview,
+            commands::film_export_final,
+            commands::film_export_srt,
         ])
         .run(tauri::generate_context!())
         .expect("error while running VideosFlow");

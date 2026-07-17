@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tokio::sync::mpsc;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -552,6 +552,81 @@ async fn run_job(pool: &SqlitePool, client: &Client, port: u16, data_dir: &Path,
                         status: "done".into(),
                         message: Some(format!("Premiere 导出完成：{out_dir}")),
                         payload: Some(serde_json::json!({ "outDir": out_dir })),
+                    });
+                }
+                Err(e) => {
+                    db::task_update(pool, &job.id, "failed", 100.0, &e).await.ok();
+                    emit(ProgressMsg {
+                        task_id: job.id.clone(),
+                        progress: 100.0,
+                        status: "failed".into(),
+                        message: Some(e),
+                        payload: None,
+                    });
+                }
+            }
+            return;
+        }
+        "film_render_preview" => {
+            match run_film_render_preview(pool, client, data_dir, &job, emit.clone()).await {
+                Ok(out_path) => {
+                    db::task_update(pool, &job.id, "done", 100.0, "预览成片已生成").await.ok();
+                    emit(ProgressMsg {
+                        task_id: job.id.clone(),
+                        progress: 100.0,
+                        status: "done".into(),
+                        message: Some("预览成片已生成".into()),
+                        payload: Some(serde_json::json!({ "outPath": out_path })),
+                    });
+                }
+                Err(e) => {
+                    db::task_update(pool, &job.id, "failed", 100.0, &e).await.ok();
+                    emit(ProgressMsg {
+                        task_id: job.id.clone(),
+                        progress: 100.0,
+                        status: "failed".into(),
+                        message: Some(e),
+                        payload: None,
+                    });
+                }
+            }
+            return;
+        }
+        "film_export_final" => {
+            match run_film_export_final(pool, client, data_dir, &job, emit.clone()).await {
+                Ok(out_path) => {
+                    db::task_update(pool, &job.id, "done", 100.0, "成片 MP4 已导出").await.ok();
+                    emit(ProgressMsg {
+                        task_id: job.id.clone(),
+                        progress: 100.0,
+                        status: "done".into(),
+                        message: Some("成片 MP4 已导出".into()),
+                        payload: Some(serde_json::json!({ "outPath": out_path })),
+                    });
+                }
+                Err(e) => {
+                    db::task_update(pool, &job.id, "failed", 100.0, &e).await.ok();
+                    emit(ProgressMsg {
+                        task_id: job.id.clone(),
+                        progress: 100.0,
+                        status: "failed".into(),
+                        message: Some(e),
+                        payload: None,
+                    });
+                }
+            }
+            return;
+        }
+        "film_export_srt" => {
+            match run_film_export_srt(pool, data_dir, &job, emit.clone()).await {
+                Ok(out_path) => {
+                    db::task_update(pool, &job.id, "done", 100.0, &format!("SRT 已导出：{out_path}")).await.ok();
+                    emit(ProgressMsg {
+                        task_id: job.id.clone(),
+                        progress: 100.0,
+                        status: "done".into(),
+                        message: Some(format!("SRT 已导出：{out_path}")),
+                        payload: Some(serde_json::json!({ "outPath": out_path })),
                     });
                 }
                 Err(e) => {
@@ -2464,14 +2539,18 @@ pub async fn run_llm_text(
     let body = serde_json::json!({
         "model": model,
         "messages": [{ "role": "user", "content": prompt }],
-        "max_tokens": 1024,
+        // 输出 token 上限：原为 1024，导致「解说词初稿」等长文本被硬截断。
+        // 提升到 8192（约 5000-6000 中文字，20x+ 需求量），彻底消除截断。
+        // 注意：单位是输出 token 而非字符，模型 API 对此有硬上限（常见 4K~16K），
+        // 设置过高（如百万级）会被 API 直接拒绝并触发上层静默回退，故取通用安全的 8192。
+        "max_tokens": 8192,
         "temperature": 0.7,
     });
     let resp = client
         .post(&url)
         .bearer_auth(api_key)
         .json(&body)
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(180))
         .send()
         .await
         .map_err(|e| format!("大模型调用失败: {e}"))?;
@@ -3460,16 +3539,22 @@ async fn tts_one_segment(
         _ => return Err("未配置 TTS Key（设置 → 接口 → 语音合成）".into()),
     };
     let base_url = row.base_url.trim_end_matches('/');
+    // XiaomiMiMo TTS 走 Chat Completions 协议（非 OpenAI 的 /audio/speech，后者返回 404）：
+    // 文本放进 messages 里 role=assistant 的 content，audio 对象声明格式/音色，
+    // 响应在 choices[0].message.audio.data（base64 音频）。
+    let v = if voice.is_empty() || voice.eq_ignore_ascii_case("default") { "mimo_default" } else { voice };
     let body = serde_json::json!({
         "model": row.model,
-        "input": text,
-        "voice": voice,
+        "messages": [ { "role": "assistant", "content": text } ],
+        "audio": { "format": "wav", "voice": v },
+        "stream": false,
     });
     let resp = client
-        .post(format!("{base_url}/audio/speech"))
+        .post(format!("{base_url}/chat/completions"))
+        .header("api-key", &key)
         .bearer_auth(&key)
         .json(&body)
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(90))
         .send()
         .await
         .map_err(|e| format!("TTS 请求失败: {e}"))?;
@@ -3478,7 +3563,15 @@ async fn tts_one_segment(
         let txt = resp.text().await.unwrap_or_default();
         return Err(format!("TTS {}: {}", st, txt.chars().take(200).collect::<String>()));
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("读响应失败: {e}"))?;
+    let j: serde_json::Value = resp.json().await.map_err(|e| format!("TTS 响应解析失败: {e}"))?;
+    let b64 = j
+        .get("choices").and_then(|c| c.get(0))
+        .and_then(|m| m.get("message"))
+        .and_then(|m| m.get("audio"))
+        .and_then(|a| a.get("data"))
+        .and_then(|d| d.as_str())
+        .ok_or("TTS 响应缺少 audio.data（未返回音频）")?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| format!("TTS 音频解码失败: {e}"))?;
     if let Some(parent) = out_path.parent() { std::fs::create_dir_all(parent).ok(); }
     std::fs::write(out_path, &bytes).map_err(|e| format!("写 wav 失败: {e}"))?;
     Ok(out_path.to_string_lossy().to_string())
@@ -3506,30 +3599,26 @@ async fn run_film_jianying_draft(
     let segs = parse_script_to_draft_segments(&script);
     if segs.is_empty() { return Err("无可导出的分镜".into()); }
 
-    // 2) 准备输出根目录：data_dir/jianying_drafts/<project>_<ts>/
+    // 2) 准备输出根目录：若指定 outDir 则写入该文件夹下的 <project>_<ts>/ 子目录，否则回退 data_dir/jianying_drafts/
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let mut base = data_dir.to_path_buf();
-    base.push("jianying_drafts");
     let safe = sanitize_filename(&project_id);
+    let base = match job.payload.get("outDir").and_then(|v| v.as_str()) {
+        Some(d) if !d.trim().is_empty() => PathBuf::from(d.trim()),
+        _ => { let mut b = data_dir.to_path_buf(); b.push("jianying_drafts"); b }
+    };
     let draft_root = base.join(format!("{safe}_{ts}"));
     std::fs::create_dir_all(&draft_root).map_err(|e| format!("建目录失败: {e}"))?;
     std::fs::create_dir_all(draft_root.join("video")).ok();
     std::fs::create_dir_all(draft_root.join("audio")).ok();
     std::fs::create_dir_all(draft_root.join("subtitle")).ok();
 
-    // 3) 视频：用占位片段（mp4stub），不真正切（剪映打开后由用户手动对齐），确保目录结构完整可用
-    let n = segs.len();
-    for i in 0..n {
-        let prog = 10.0 + (i as f64 / n as f64) * 70.0;
-        emit(ProgressMsg { task_id: job.id.clone(), progress: prog, status: "running".into(),
-            message: Some(format!("生成素材引用 {}/{}", i + 1, n)), payload: None });
-        // 视频素材条目（在 draft_content.json 中以相对路径 video/seg_N.mp4 引用）
-        // 为避免无效文件占空间，这里用 1x1 黑色 jpeg 占位（剪映可正常导入但无画面）
-        let _ = i;
-    }
+    // 3) 真实素材：逐段从源片切出 video/seg_<i>.mp4，并复制分段配音 audio/seg_<i>.wav（若已批量配音）
+    let ff = FfMpeg::ensure(data_dir).await?;
+    let dub_dir = data_dir.join("dub").join(&safe);
+    let has_audio = cut_real_materials(&ff, &video_path, &segs, &dub_dir, &draft_root, emit.clone(), &job.id, 10.0, 70.0).await;
 
-    // 4) 写出 draft_content.json（剪映 v3+ 的结构：tracks/id/segments/materials）
-    let content = build_jianying_content(&project_id, &segs, &draft_root)?;
+    // 4) 写出 draft_content.json（真实素材引用：视频轨 + 字幕轨 + 配音轨）
+    let content = build_jianying_content_real(&segs, &has_audio);
     std::fs::write(draft_root.join("draft_content.json"),
         serde_json::to_string_pretty(&content).map_err(|e| format!("序列化失败: {e}"))?)
         .map_err(|e| format!("写 draft_content.json 失败: {e}"))?;
@@ -3546,8 +3635,9 @@ async fn run_film_jianying_draft(
     std::fs::write(draft_root.join("draft_meta_info.json"), serde_json::to_string_pretty(&meta).unwrap_or_default()).ok();
     std::fs::write(draft_root.join("draft_extra_info.json"), serde_json::to_string_pretty(&serde_json::json!({"extra_info": null})).unwrap_or_default()).ok();
 
-    // 6) 列出最终目录结构
-    let _ = video_path; // 暂不切：避免导出耗时过长 & 路径含空格问题，后续可接入 ffmpeg 切片段复用 run_film_export 路径
+    let audio_cnt = has_audio.iter().filter(|x| **x).count();
+    emit(ProgressMsg { task_id: job.id.clone(), progress: 95.0, status: "running".into(),
+        message: Some(format!("草稿生成：{} 段视频 / {} 段配音", segs.len(), audio_cnt)), payload: None });
 
     Ok(draft_root.display().to_string())
 }
@@ -3572,23 +3662,16 @@ fn parse_script_to_draft_segments(script: &str) -> Vec<DraftSegment> {
 }
 
 fn regex_lite(line: &str) -> Option<DraftSegment> {
-    // [section] mm:ss-mm:ss text
+    // 格式：[section] m:ss-m:ss 文案  （分钟 1~2 位，无前导零均可）
     let parts: Vec<&str> = line.splitn(2, ']').collect();
     if parts.len() != 2 { return None; }
     let section = parts[0].trim_start_matches('[').trim().to_string();
     let rest = parts[1].trim();
-    // 找 mm:ss-mm:ss
-    let mut ts_end = 0;
-    let mut n = 0;
-    let mut buf = String::new();
-    for (i, c) in rest.char_indices() {
-        buf.push(c);
-        n += 1;
-        if n == 13 { ts_end = i + c.len_utf8(); break; }
-    }
-    if ts_end == 0 { return None; }
-    let ts_part = &rest[..ts_end];
-    let text = rest[ts_end..].trim().to_string();
+    // 时间戳在前，其后空白分隔文案；支持 1 位或 2 位分钟
+    let sp: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
+    if sp.len() != 2 { return None; }
+    let ts_part = sp[0].trim();
+    let text = sp[1].trim().to_string();
     let ts: Vec<&str> = ts_part.splitn(2, '-').collect();
     if ts.len() != 2 { return None; }
     let parse_ts = |s: &str| -> Option<f64> {
@@ -3606,6 +3689,7 @@ fn regex_lite(line: &str) -> Option<DraftSegment> {
     };
     let start = parse_ts(ts[0].trim())?;
     let end = parse_ts(ts[1].trim())?;
+    if end <= start { return None; }
     Some(DraftSegment { section, start, end, text, voice: None })
 }
 
@@ -3613,27 +3697,20 @@ fn sanitize_filename(s: &str) -> String {
     s.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect::<String>().chars().take(48).collect()
 }
 
-fn build_jianying_content(_project_id: &str, segs: &[DraftSegment], _draft_root: &std::path::Path) -> Result<serde_json::Value, String> {
-    // 剪映 v3+ 的 draft_content.json 结构骨架（节选常用字段，剪映可正常打开补全其余）
-    let mut tracks: Vec<serde_json::Value> = Vec::new();
+/// 生成真实可用的剪映 draft_content.json：视频轨（每段从源片真实切出的 video/seg_<i>.mp4）
+/// + 字幕轨（每段解说词文本）+ 配音轨（若批量配音已生成 seg_<i>.wav 则引用 audio/seg_<i>.wav）。
+fn build_jianying_content_real(segs: &[DraftSegment], has_audio: &[bool]) -> serde_json::Value {
     let mut videos: Vec<serde_json::Value> = Vec::new();
     for (i, s) in segs.iter().enumerate() {
         let dur_us = ((s.end - s.start) * 1_000_000.0).max(0.0) as i64;
         let start_us = (s.start * 1_000_000.0) as i64;
-        let seg_id = format!("seg_v_{i}");
         videos.push(serde_json::json!({
-            "id": seg_id, "type": "video", "material_id": format!("mat_v_{i}"),
+            "id": format!("seg_v_{i}"), "type": "video", "material_id": format!("mat_v_{i}"),
+            "source_timerange": { "start": 0, "duration": dur_us },
             "target_timerange": { "start": start_us, "duration": dur_us },
             "speed": 1.0, "volume": 1.0, "visible": true, "extra_material_refs": []
         }));
-        let _ = i; // placeholder
     }
-    tracks.push(serde_json::json!({
-        "id": "main_video", "type": "video", "attribute": 0, "flag": 0,
-        "segments": videos
-    }));
-
-    // 字幕轨：每段一个文本
     let mut subs: Vec<serde_json::Value> = Vec::new();
     for (i, s) in segs.iter().enumerate() {
         let dur_us = ((s.end - s.start) * 1_000_000.0).max(0.0) as i64;
@@ -3646,17 +3723,13 @@ fn build_jianying_content(_project_id: &str, segs: &[DraftSegment], _draft_root:
             "extra_material_refs": []
         }));
     }
-    tracks.push(serde_json::json!({
-        "id": "main_subtitle", "type": "text", "attribute": 0, "flag": 0,
-        "segments": subs
-    }));
-
-    let materials_video: Vec<serde_json::Value> = segs.iter().enumerate().map(|(i, _)| {
+    let materials_video: Vec<serde_json::Value> = segs.iter().enumerate().map(|(i, s)| {
         serde_json::json!({
             "id": format!("mat_v_{i}"),
             "type": "video",
-            "path": format!("video/seg_{i:03}.mp4"),
-            "duration": 5_000_000_i64, "width": 1280, "height": 720,
+            "path": format!("video/seg_{:03}.mp4", i),
+            "duration": ((s.end - s.start) * 1_000_000.0) as i64,
+            "width": 1280, "height": 720,
             "has_audio": false,
             "has_sound_separated": false
         })
@@ -3669,7 +3742,40 @@ fn build_jianying_content(_project_id: &str, segs: &[DraftSegment], _draft_root:
         })
     }).collect();
 
-    Ok(serde_json::json!({
+    let mut tracks: Vec<serde_json::Value> = vec![
+        serde_json::json!({
+            "id": "main_video", "type": "video", "attribute": 0, "flag": 0, "segments": videos
+        }),
+        serde_json::json!({
+            "id": "main_subtitle", "type": "text", "attribute": 0, "flag": 0, "segments": subs
+        }),
+    ];
+
+    let mut materials_audio: Vec<serde_json::Value> = Vec::new();
+    if has_audio.iter().any(|x| *x) {
+        let mut audios: Vec<serde_json::Value> = Vec::new();
+        for (i, s) in segs.iter().enumerate() {
+            if !has_audio.get(i).copied().unwrap_or(false) { continue; }
+            let dur_us = ((s.end - s.start) * 1_000_000.0).max(0.0) as i64;
+            let start_us = (s.start * 1_000_000.0) as i64;
+            audios.push(serde_json::json!({
+                "id": format!("seg_a_{i}"), "type": "audio", "material_id": format!("mat_a_{i}"),
+                "source_timerange": { "start": 0, "duration": dur_us },
+                "target_timerange": { "start": start_us, "duration": dur_us },
+                "speed": 1.0, "volume": 1.0, "visible": true, "extra_material_refs": []
+            }));
+            materials_audio.push(serde_json::json!({
+                "id": format!("mat_a_{i}"), "type": "audio",
+                "path": format!("audio/seg_{:03}.wav", i),
+                "duration": dur_us
+            }));
+        }
+        tracks.push(serde_json::json!({
+            "id": "main_audio", "type": "audio", "attribute": 0, "flag": 0, "segments": audios
+        }));
+    }
+
+    serde_json::json!({
         "id": format!("VF_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)),
         "canvas_config": { "width": 1280, "height": 720, "ratio": "16:9" },
         "duration": (segs.last().map(|s| s.end).unwrap_or(0.0) * 1_000_000.0) as i64,
@@ -3678,7 +3784,7 @@ fn build_jianying_content(_project_id: &str, segs: &[DraftSegment], _draft_root:
         "materials": {
             "videos": materials_video,
             "texts": materials_text,
-            "audios": [],
+            "audios": materials_audio,
             "audio_effects": [],
             "audio_fades": [],
             "audio_indexes": [],
@@ -3693,7 +3799,7 @@ fn build_jianying_content(_project_id: &str, segs: &[DraftSegment], _draft_root:
         },
         "relations": [],
         "version": 3
-    }))
+    })
 }
 
 // ===========================================================================
@@ -3716,10 +3822,12 @@ async fn run_film_premiere_export(
     if segs.is_empty() { return Err("无可导出的分镜".into()); }
 
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let mut out_dir = data_dir.to_path_buf();
-    out_dir.push("premier_drafts");
     let safe = sanitize_filename(&project_id);
-    let draft_root = out_dir.join(format!("{safe}_{ts}"));
+    let out_dir_base = match job.payload.get("outDir").and_then(|v| v.as_str()) {
+        Some(d) if !d.trim().is_empty() => PathBuf::from(d.trim()),
+        _ => { let mut b = data_dir.to_path_buf(); b.push("premier_drafts"); b }
+    };
+    let draft_root = out_dir_base.join(format!("{safe}_{ts}"));
     std::fs::create_dir_all(&draft_root).map_err(|e| format!("建目录失败: {e}"))?;
 
     // (1) .edl（CMX3600，仅视频轨；时间线从零开始）
@@ -3810,7 +3918,7 @@ fn fmt_srt(sec: f64) -> String {
 // ===========================================================================
 
 async fn run_film_jianying_draft_intl(
-    pool: &SqlitePool,
+    _pool: &SqlitePool,
     _client: &Client,
     data_dir: &Path,
     job: &TaskJob,
@@ -3826,17 +3934,25 @@ async fn run_film_jianying_draft_intl(
     if segs.is_empty() { return Err("no segments to export".into()); }
 
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let mut base = data_dir.to_path_buf();
-    base.push("jianying_drafts_intl");
     let safe = sanitize_filename(&project_id);
+    let base = match job.payload.get("outDir").and_then(|v| v.as_str()) {
+        Some(d) if !d.trim().is_empty() => PathBuf::from(d.trim()),
+        _ => { let mut b = data_dir.to_path_buf(); b.push("jianying_drafts_intl"); b }
+    };
     let draft_root = base.join(format!("{safe}_{ts}"));
     std::fs::create_dir_all(&draft_root).map_err(|e| format!("create dir failed: {e}"))?;
     std::fs::create_dir_all(draft_root.join("video")).ok();
     std::fs::create_dir_all(draft_root.join("audio")).ok();
     std::fs::create_dir_all(draft_root.join("subtitle")).ok();
 
-    // 复用国内版 draft 构造，但 path 改为绝对路径
-    let content = build_jianying_content_intl(&segs, &draft_root)?;
+    // 真实素材：切视频 + 复制分段配音（与国内版共用逻辑）
+    let ff = FfMpeg::ensure(data_dir).await?;
+    let video_path = job.payload.get("videoPath").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let dub_dir = data_dir.join("dub").join(&safe);
+    let has_audio = cut_real_materials(&ff, &video_path, &segs, &dub_dir, &draft_root, emit.clone(), &job.id, 15.0, 65.0).await;
+
+    // 国际版：material path 用绝对路径
+    let content = build_jianying_content_intl_real(&segs, &has_audio, &draft_root);
     std::fs::write(draft_root.join("draft_content.json"),
         serde_json::to_string_pretty(&content).map_err(|e| format!("serialize failed: {e}"))?)
         .map_err(|e| format!("write draft_content.json failed: {e}"))?;
@@ -3848,7 +3964,6 @@ async fn run_film_jianying_draft_intl(
         "draft_fold_path": draft_root.file_name().unwrap().to_string_lossy().to_string(),
         "tm_duration": (segs.last().map(|s| s.end).unwrap_or(0.0) * 1_000_000.0) as i64,
         "cover": "", "fps": 30.0,
-        // CapCut 国际版 platform 标识
         "platform": { "app_id": 3704, "app_source": "lv", "app_version": "9.0.0", "device_id": "vf-capcut" },
         "draft_cover": "", "draft_root_path": draft_root.display().to_string(),
         "draft_removable_storage_device": "",
@@ -3857,28 +3972,24 @@ async fn run_film_jianying_draft_intl(
     std::fs::write(draft_root.join("draft_meta_info.json"), serde_json::to_string_pretty(&meta).unwrap_or_default()).ok();
     std::fs::write(draft_root.join("draft_extra_info.json"), serde_json::to_string_pretty(&serde_json::json!({"extra_info": null})).unwrap_or_default()).ok();
 
-    let _ = pool;
+    let audio_cnt = has_audio.iter().filter(|x| **x).count();
+    emit(ProgressMsg { task_id: job.id.clone(), progress: 95.0, status: "running".into(),
+        message: Some(format!("CapCut draft: {} clips / {} audio", segs.len(), audio_cnt)), payload: None });
     Ok(draft_root.display().to_string())
 }
 
-fn build_jianying_content_intl(segs: &[DraftSegment], draft_root: &std::path::Path) -> Result<serde_json::Value, String> {
-    let mut tracks: Vec<serde_json::Value> = Vec::new();
+fn build_jianying_content_intl_real(segs: &[DraftSegment], has_audio: &[bool], draft_root: &std::path::Path) -> serde_json::Value {
     let mut videos: Vec<serde_json::Value> = Vec::new();
     for (i, s) in segs.iter().enumerate() {
         let dur_us = ((s.end - s.start) * 1_000_000.0).max(0.0) as i64;
         let start_us = (s.start * 1_000_000.0) as i64;
-        let seg_id = format!("seg_v_{i}");
         videos.push(serde_json::json!({
-            "id": seg_id, "type": "video", "material_id": format!("mat_v_{i}"),
+            "id": format!("seg_v_{i}"), "type": "video", "material_id": format!("mat_v_{i}"),
+            "source_timerange": { "start": 0, "duration": dur_us },
             "target_timerange": { "start": start_us, "duration": dur_us },
             "speed": 1.0, "volume": 1.0, "visible": true, "extra_material_refs": []
         }));
     }
-    tracks.push(serde_json::json!({
-        "id": "main_video", "type": "video", "attribute": 0, "flag": 0,
-        "segments": videos
-    }));
-
     let mut subs: Vec<serde_json::Value> = Vec::new();
     for (i, s) in segs.iter().enumerate() {
         let dur_us = ((s.end - s.start) * 1_000_000.0).max(0.0) as i64;
@@ -3891,37 +4002,61 @@ fn build_jianying_content_intl(segs: &[DraftSegment], draft_root: &std::path::Pa
             "extra_material_refs": []
         }));
     }
-    tracks.push(serde_json::json!({
-        "id": "main_subtitle", "type": "text", "attribute": 0, "flag": 0,
-        "segments": subs
-    }));
-
-    // 国际剪映：media path 用绝对路径
-    let materials_video: Vec<serde_json::Value> = segs.iter().enumerate().map(|(i, _)| {
-        let p = draft_root.join(format!("video/seg_{i:03}.mp4"));
+    let materials_video: Vec<serde_json::Value> = segs.iter().enumerate().map(|(i, s)| {
+        let p = draft_root.join(format!("video/seg_{:03}.mp4", i));
         serde_json::json!({
             "id": format!("mat_v_{i}"),
             "type": "video",
-            "path": p.display().to_string(),  // 绝对路径
-            "duration": 5_000_000_i64, "width": 1280, "height": 720,
+            "path": p.display().to_string(),
+            "material_name": format!("seg_{}", i),
+            "duration": ((s.end - s.start) * 1_000_000.0) as i64,
+            "width": 1280, "height": 720,
             "has_audio": false,
-            "has_sound_separated": false,
-            "material_name": format!("seg_{i}"),
+            "has_sound_separated": false
         })
     }).collect();
     let materials_text: Vec<serde_json::Value> = segs.iter().enumerate().map(|(i, s)| {
         serde_json::json!({
             "id": format!("mat_s_{i}"),
             "type": "text",
-            "content": {
-                "text": s.text,
-                "font": { "id": "default" },
-                "styles": []
-            }
+            "content": { "text": s.text, "font": { "id": "default" }, "styles": [] }
         })
     }).collect();
 
-    Ok(serde_json::json!({
+    let mut tracks: Vec<serde_json::Value> = vec![
+        serde_json::json!({
+            "id": "main_video", "type": "video", "attribute": 0, "flag": 0, "segments": videos
+        }),
+        serde_json::json!({
+            "id": "main_subtitle", "type": "text", "attribute": 0, "flag": 0, "segments": subs
+        }),
+    ];
+    let mut materials_audio: Vec<serde_json::Value> = Vec::new();
+    if has_audio.iter().any(|x| *x) {
+        let mut audios: Vec<serde_json::Value> = Vec::new();
+        for (i, s) in segs.iter().enumerate() {
+            if !has_audio.get(i).copied().unwrap_or(false) { continue; }
+            let dur_us = ((s.end - s.start) * 1_000_000.0).max(0.0) as i64;
+            let start_us = (s.start * 1_000_000.0) as i64;
+            audios.push(serde_json::json!({
+                "id": format!("seg_a_{i}"), "type": "audio", "material_id": format!("mat_a_{i}"),
+                "source_timerange": { "start": 0, "duration": dur_us },
+                "target_timerange": { "start": start_us, "duration": dur_us },
+                "speed": 1.0, "volume": 1.0, "visible": true, "extra_material_refs": []
+            }));
+            let p = draft_root.join(format!("audio/seg_{:03}.wav", i));
+            materials_audio.push(serde_json::json!({
+                "id": format!("mat_a_{i}"), "type": "audio",
+                "path": p.display().to_string(),
+                "duration": dur_us
+            }));
+        }
+        tracks.push(serde_json::json!({
+            "id": "main_audio", "type": "audio", "attribute": 0, "flag": 0, "segments": audios
+        }));
+    }
+
+    serde_json::json!({
         "id": format!("VF_INTL_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)),
         "canvas_config": { "width": 1280, "height": 720, "ratio": "16:9" },
         "duration": (segs.last().map(|s| s.end).unwrap_or(0.0) * 1_000_000.0) as i64,
@@ -3930,7 +4065,7 @@ fn build_jianying_content_intl(segs: &[DraftSegment], draft_root: &std::path::Pa
         "materials": {
             "videos": materials_video,
             "texts": materials_text,
-            "audios": [],
+            "audios": materials_audio,
             "audio_effects": [], "audio_fades": [], "audio_indexes": [],
             "video_effects": [], "transitions": [], "effects": [],
             "filters": [], "animations": [], "stickers": [], "speech_to_songs": [],
@@ -3938,9 +4073,376 @@ fn build_jianying_content_intl(segs: &[DraftSegment], draft_root: &std::path::Pa
         },
         "relations": [],
         "version": 3,
-        // CapCut 国际版特有字段
         "platform": { "app_id": 3704, "app_source": "lv" }
-    }))
+    })
+}
+
+// ===========================================================================
+// 分镜合成辅助：单段 ASS 字幕 / 真实素材切割 / 成片合成（预览 & 导出成片共用）
+// ===========================================================================
+
+/// 由单段解说词生成 ASS 字幕文本（保留函数以备兼容，当前 render_composite 已切换到 drawtext 方案）。
+#[allow(dead_code)]
+fn build_segment_ass(text: &str, style_choice: &str, dur: f64) -> String {
+    let (primary, outline, shadow) = if style_choice.contains("无边框") {
+        ("&H00FFFFFF", 0, 0)
+    } else if style_choice.contains("阴影") {
+        ("&H00000000", 0, 2)
+    } else {
+        // 经典：白字厚黑边+阴影，确保在任何视频背景上清晰可读
+        ("&H00FFFFFF", 3, 2)
+    };
+    // ASS 是 CSV 逗号分隔格式，Fontname 字段内含逗号会导致整行字段错位（字号/颜色/对齐全偏移）→
+    // 字幕渲染不可见。必须使用单一字体名，libass 缺失时会自动回退系统默认。
+    let fontname = "Microsoft YaHei";
+    let style = format!(
+        "Style: Default,{fontname},48,{primary},&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{outline},{shadow},2,20,35,1"
+    );
+    let safe = text.replace('\\', "\\\\").replace(',', "\\,").replace('\n', "\\N");
+    format!(
+        "[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n{style}\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:00.00,{},Default,,0,0,0,,{}\n",
+        ffmpeg::ass_time(dur), safe
+    )
+}
+
+/// 把分镜逐段合成（切片 → 烧字幕 → 可选混入分段配音），返回每段最终 mp4 路径（已烧字幕、必要时已混入配音）。
+async fn render_composite(
+    ff: &FfMpeg,
+    video_path: &str,
+    segs: &[DraftSegment],
+    dub_dir: &Path,
+    subtitle_style: &str,
+    mix_voice: bool,
+    out_dir: &Path,
+    emit: Arc<dyn Fn(ProgressMsg) + Send + Sync>,
+    task_id: &str,
+    progress_base: f64,
+    progress_span: f64,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let n = segs.len();
+    let mut parts: Vec<std::path::PathBuf> = Vec::with_capacity(n);
+    for (i, s) in segs.iter().enumerate() {
+        let prog = progress_base + (i as f64 / n.max(1) as f64) * progress_span;
+        emit(ProgressMsg {
+            task_id: task_id.to_string(),
+            progress: prog,
+            status: "running".into(),
+            message: Some(format!("合成片段 {}/{}", i + 1, n)),
+            payload: None,
+        });
+        if s.end <= s.start {
+            continue;
+        }
+        let seg = out_dir.join(format!("seg_{:03}.mp4", i));
+        if !ff.segment_cmd(video_path, s.start, s.end, seg.to_str().unwrap()).output().map_err(|e| e.to_string())?.status.success() {
+            emit(ProgressMsg {
+                task_id: task_id.to_string(),
+                progress: prog,
+                status: "running".into(),
+                message: Some(format!("片段 {}/{} 切片失败，跳过", i + 1, n)),
+                payload: None,
+            });
+            continue;
+        }
+        // 烧字幕（用 drawtext 滤镜：比 ASS 更可靠，不依赖 libass，任何分辨率都稳定）
+        let _ = subtitle_style; // 保留参数兼容（drawtext 内置样式）
+        if s.text.trim().is_empty() {
+            let _ = std::fs::copy(&seg, &out_dir.join(format!("burn_{:03}.mp4", i)));
+            continue;
+        }
+        let text_path = out_dir.join(format!("seg_{:03}.txt", i));
+        if let Err(e) = std::fs::write(&text_path, &s.text) {
+            emit(ProgressMsg {
+                task_id: task_id.to_string(),
+                progress: prog,
+                status: "running".into(),
+                message: Some(format!("片段 {}/{} 字幕文件写入失败: {}（将保留无字幕片段）", i + 1, n, e)),
+                payload: None,
+            });
+            let _ = std::fs::copy(&seg, &out_dir.join(format!("burn_{:03}.mp4", i)));
+            continue;
+        }
+        let burned = out_dir.join(format!("burn_{:03}.mp4", i));
+        let burn_out = ff
+            .burn_subtitle_cmd(seg.to_str().unwrap(), text_path.to_str().unwrap(), burned.to_str().unwrap())
+            .output();
+        match burn_out {
+            Ok(o) if o.status.success() => {
+                let preview: String = s.text.chars().take(24).collect();
+                emit(ProgressMsg {
+                    task_id: task_id.to_string(),
+                    progress: prog,
+                    status: "running".into(),
+                    message: Some(format!("片段 {}/{} 字幕已烧录: 「{}…」", i + 1, n, preview)),
+                    payload: None,
+                });
+            }
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                let tail: String = err.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
+                emit(ProgressMsg {
+                    task_id: task_id.to_string(),
+                    progress: prog,
+                    status: "running".into(),
+                    message: Some(format!("片段 {}/{} 字幕烧录失败: {}（回退无字幕片段）", i + 1, n, tail)),
+                    payload: None,
+                });
+                let _ = std::fs::copy(&seg, &burned);
+            }
+            Err(e) => {
+                emit(ProgressMsg {
+                    task_id: task_id.to_string(),
+                    progress: prog,
+                    status: "running".into(),
+                    message: Some(format!("片段 {}/{} 字幕烧录命令启动失败: {}（回退无字幕片段）", i + 1, n, e)),
+                    payload: None,
+                });
+                let _ = std::fs::copy(&seg, &burned);
+            }
+        }
+        // 混音：若批量配音已生成对应 wav，则替换为配音音轨；否则保留原声
+        let final_seg = out_dir.join(format!("vo_{:03}.mp4", i));
+        let dub_file = dub_dir.join(format!("seg_{:03}.wav", i));
+        if mix_voice && dub_file.exists() {
+            if !ff.mux_cmd(burned.to_str().unwrap(), dub_file.to_str().unwrap(), final_seg.to_str().unwrap()).output().map_err(|e| e.to_string())?.status.success() {
+                let _ = std::fs::copy(&burned, &final_seg);
+            }
+        } else {
+            let _ = std::fs::copy(&burned, &final_seg);
+        }
+        parts.push(final_seg);
+    }
+    if parts.is_empty() {
+        return Err("没有可合成的片段（请检查分镜时间轴或源视频）".into());
+    }
+    Ok(parts)
+}
+
+/// 导出剪映草稿时，逐段从源片切出真实视频素材并复制分段配音到草稿目录。
+/// 返回 has_audio：每段是否存在对应配音文件。
+async fn cut_real_materials(
+    ff: &FfMpeg,
+    video_path: &str,
+    segs: &[DraftSegment],
+    dub_dir: &Path,
+    draft_root: &Path,
+    emit: Arc<dyn Fn(ProgressMsg) + Send + Sync>,
+    task_id: &str,
+    progress_base: f64,
+    progress_span: f64,
+) -> Vec<bool> {
+    let n = segs.len();
+    let mut has_audio: Vec<bool> = Vec::with_capacity(n);
+    for (i, s) in segs.iter().enumerate() {
+        let prog = progress_base + (i as f64 / n.max(1) as f64) * progress_span;
+        emit(ProgressMsg {
+            task_id: task_id.to_string(),
+            progress: prog,
+            status: "running".into(),
+            message: Some(format!("切素材 {}/{}", i + 1, n)),
+            payload: None,
+        });
+        let mut has = false;
+        if s.end > s.start {
+            let vout = draft_root.join("video").join(format!("seg_{:03}.mp4", i));
+            if !ff.segment_cmd(video_path, s.start, s.end, vout.to_str().unwrap()).output().map_err(|e| e.to_string()).map(|o| o.status.success()).unwrap_or(false) {
+                emit(ProgressMsg {
+                    task_id: task_id.to_string(),
+                    progress: prog,
+                    status: "running".into(),
+                    message: Some(format!("片段 {}/{} 切片失败（源片可能缺失）", i + 1, n)),
+                    payload: None,
+                });
+            }
+            let dub_src = dub_dir.join(format!("seg_{:03}.wav", i));
+            if dub_src.exists() {
+                let aout = draft_root.join("audio").join(format!("seg_{:03}.wav", i));
+                if std::fs::copy(&dub_src, &aout).is_ok() {
+                    has = true;
+                }
+            }
+        }
+        has_audio.push(has);
+    }
+    has_audio
+}
+
+/// 导出成片 / 预览前，确保每段配音 wav 已存在；缺失则自动调用 TTS 合成（需配置 TTS Key）。
+/// 失败不影响整体（后续回退原声），但会 emit 警告让用户知道。
+async fn ensure_dub_for_segs(
+    pool: &SqlitePool,
+    client: &Client,
+    segs: &[DraftSegment],
+    dub_dir: &Path,
+    emit: Arc<dyn Fn(ProgressMsg) + Send + Sync>,
+    task_id: &str,
+    progress_base: f64,
+    progress_span: f64,
+) {
+    let n = segs.len();
+    if n == 0 { return; }
+    std::fs::create_dir_all(dub_dir).ok();
+    let mut ok = 0usize;
+    let mut fail = 0usize;
+    for (i, s) in segs.iter().enumerate() {
+        let wav = dub_dir.join(format!("seg_{:03}.wav", i));
+        if wav.exists() { ok += 1; continue; }
+        if s.text.trim().is_empty() { continue; }
+        let prog = progress_base + (i as f64 / n.max(1) as f64) * progress_span;
+        emit(ProgressMsg {
+            task_id: task_id.to_string(),
+            progress: prog,
+            status: "running".into(),
+            message: Some(format!("自动合成配音 {}/{}", i + 1, n)),
+            payload: None,
+        });
+        let voice = s.voice.clone().unwrap_or_else(|| "default".into());
+        match tts_one_segment(pool, client, &s.text, &voice, &wav).await {
+            Ok(_) => { ok += 1; }
+            Err(e) => {
+                fail += 1;
+                emit(ProgressMsg {
+                    task_id: task_id.to_string(),
+                    progress: prog,
+                    status: "running".into(),
+                    message: Some(format!("配音 {}/{} 失败：{}（将保留原声）", i + 1, n, e)),
+                    payload: None,
+                });
+            }
+        }
+    }
+    if fail > 0 {
+        emit(ProgressMsg {
+            task_id: task_id.to_string(),
+            progress: progress_base + progress_span,
+            status: "running".into(),
+            message: Some(format!("配音就绪 {}/{}，{} 段失败（缺失 TTS Key 或未配置语音合成）", ok, n, fail)),
+            payload: None,
+        });
+    }
+}
+
+/// 预览成片：合成「原片 + 分段配音 + 烧录字幕」到一个 MP4，写到 data_dir/preview/<safe>.mp4。
+async fn run_film_render_preview(
+    pool: &SqlitePool,
+    client: &Client,
+    data_dir: &Path,
+    job: &TaskJob,
+    emit: Arc<dyn Fn(ProgressMsg) + Send + Sync>,
+) -> Result<String, String> {
+    let project_id = job.project_id.clone().ok_or("缺少 projectId")?;
+    let script = job.payload.get("script").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let video_path = job.payload.get("videoPath").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let mix_voice = job.payload.get("mixVoice").and_then(|v| v.as_bool()).unwrap_or(true);
+    let subtitle_style = job.payload.get("subtitleStyle").and_then(|v| v.as_str()).unwrap_or("经典-白字黑边").to_string();
+
+    emit(ProgressMsg { task_id: job.id.clone(), progress: 5.0, status: "running".into(),
+        message: Some("解析分镜".into()), payload: None });
+    let segs = parse_script_to_draft_segments(&script);
+    if segs.is_empty() { return Err("无可导出的分镜".into()); }
+    if video_path.is_empty() { return Err("缺少源视频路径".into()); }
+
+    let ff = FfMpeg::ensure(data_dir).await?;
+    let safe = sanitize_filename(&project_id);
+    let tmp = data_dir.join("tmp").join("preview").join(&safe);
+    std::fs::create_dir_all(&tmp).ok();
+    let dub_dir = data_dir.join("dub").join(&safe);
+
+    // 导出/预览前自动补齐缺失的配音（需 TTS Key），确保成片是真·带新配音的版本
+    if mix_voice {
+        ensure_dub_for_segs(pool, client, &segs, &dub_dir, emit.clone(), &job.id, 8.0, 12.0).await;
+    }
+
+    let parts = render_composite(&ff, &video_path, &segs, &dub_dir, &subtitle_style, mix_voice, &tmp, emit.clone(), &job.id, 20.0, 60.0).await?;
+
+    emit(ProgressMsg { task_id: job.id.clone(), progress: 85.0, status: "running".into(),
+        message: Some("拼接成片".into()), payload: None });
+    let list = tmp.join("concat.txt");
+    let content: String = parts.iter().map(|p| format!("file '{}'", p.to_string_lossy().replace('\\', "/"))).collect::<Vec<_>>().join("\n");
+    std::fs::write(&list, content).ok();
+    let rough = tmp.join("rough.mp4");
+    ff.concat_cmd(list.to_str().unwrap(), rough.to_str().unwrap()).output().map_err(|e| e.to_string())?;
+    let out_dir = match job.payload.get("outDir").and_then(|v| v.as_str()) {
+        Some(d) if !d.trim().is_empty() => PathBuf::from(d.trim()),
+        _ => { let mut b = data_dir.to_path_buf(); b.push("preview"); b }
+    };
+    std::fs::create_dir_all(&out_dir).ok();
+    let out = out_dir.join(format!("{safe}.mp4"));
+    ff.export_cmd(rough.to_str().unwrap(), out.to_str().unwrap(), false, "").output().map_err(|e| e.to_string())?;
+    Ok(out.to_string_lossy().to_string())
+}
+
+/// 导出成片 MP4：与预览同一套合成逻辑，输出到 data_dir/export/<safe>_<ts>.mp4。
+async fn run_film_export_final(
+    pool: &SqlitePool,
+    client: &Client,
+    data_dir: &Path,
+    job: &TaskJob,
+    emit: Arc<dyn Fn(ProgressMsg) + Send + Sync>,
+) -> Result<String, String> {
+    let project_id = job.project_id.clone().ok_or("缺少 projectId")?;
+    let script = job.payload.get("script").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let video_path = job.payload.get("videoPath").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let mix_voice = job.payload.get("mixVoice").and_then(|v| v.as_bool()).unwrap_or(true);
+    let subtitle_style = job.payload.get("subtitleStyle").and_then(|v| v.as_str()).unwrap_or("经典-白字黑边").to_string();
+
+    emit(ProgressMsg { task_id: job.id.clone(), progress: 5.0, status: "running".into(),
+        message: Some("解析分镜".into()), payload: None });
+    let segs = parse_script_to_draft_segments(&script);
+    if segs.is_empty() { return Err("无可导出的分镜".into()); }
+    if video_path.is_empty() { return Err("缺少源视频路径".into()); }
+
+    let ff = FfMpeg::ensure(data_dir).await?;
+    let safe = sanitize_filename(&project_id);
+    let tmp = data_dir.join("tmp").join("export_final").join(&safe);
+    std::fs::create_dir_all(&tmp).ok();
+    let dub_dir = data_dir.join("dub").join(&safe);
+
+    // 导出/预览前自动补齐缺失的配音（需 TTS Key），确保成片是真·带新配音的版本
+    if mix_voice {
+        ensure_dub_for_segs(pool, client, &segs, &dub_dir, emit.clone(), &job.id, 8.0, 12.0).await;
+    }
+
+    let parts = render_composite(&ff, &video_path, &segs, &dub_dir, &subtitle_style, mix_voice, &tmp, emit.clone(), &job.id, 20.0, 60.0).await?;
+
+    emit(ProgressMsg { task_id: job.id.clone(), progress: 85.0, status: "running".into(),
+        message: Some("拼接成片".into()), payload: None });
+    let list = tmp.join("concat.txt");
+    let content: String = parts.iter().map(|p| format!("file '{}'", p.to_string_lossy().replace('\\', "/"))).collect::<Vec<_>>().join("\n");
+    std::fs::write(&list, content).ok();
+    let rough = tmp.join("rough.mp4");
+    ff.concat_cmd(list.to_str().unwrap(), rough.to_str().unwrap()).output().map_err(|e| e.to_string())?;
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let out_dir = match job.payload.get("outDir").and_then(|v| v.as_str()) {
+        Some(d) if !d.trim().is_empty() => PathBuf::from(d.trim()),
+        _ => { let mut b = data_dir.to_path_buf(); b.push("export"); b }
+    };
+    std::fs::create_dir_all(&out_dir).ok();
+    let out = out_dir.join(format!("{safe}_{ts}.mp4"));
+    ff.export_cmd(rough.to_str().unwrap(), out.to_str().unwrap(), false, "").output().map_err(|e| e.to_string())?;
+    Ok(out.to_string_lossy().to_string())
+}
+
+/// 导出 SRT：把前端生成好的字幕内容写入指定文件夹（outDir）下的 <project>.srt；
+/// 未指定 outDir 时回退到 data_dir/export/。
+async fn run_film_export_srt(
+    _pool: &SqlitePool,
+    data_dir: &Path,
+    job: &TaskJob,
+    _emit: Arc<dyn Fn(ProgressMsg) + Send + Sync>,
+) -> Result<String, String> {
+    let project_id = job.project_id.clone().ok_or("缺少 projectId")?;
+    let content = job.payload.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if content.trim().is_empty() { return Err("SRT 内容为空".into()); }
+    let safe = sanitize_filename(&project_id);
+    let out_dir = match job.payload.get("outDir").and_then(|v| v.as_str()) {
+        Some(d) if !d.trim().is_empty() => PathBuf::from(d.trim()),
+        _ => { let mut b = data_dir.to_path_buf(); b.push("export"); b }
+    };
+    std::fs::create_dir_all(&out_dir).map_err(|e| format!("建目录失败: {e}"))?;
+    let out = out_dir.join(format!("{safe}.srt"));
+    std::fs::write(&out, content).map_err(|e| format!("写 SRT 失败: {e}"))?;
+    Ok(out.to_string_lossy().to_string())
 }
 
 // ===========================================================================

@@ -4,9 +4,22 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../state/AppContext';
-import { listVoices, batchDub, translateScript, exportJianyingDraft, dubOneSegment, importSrt, importAudioDub, exportPremiere, exportJianyingDraftIntl, releaseTaskChannel } from '../../ipc/providers';
+import { listVoices, batchDub, translateScript, exportJianyingDraft, dubOneSegment, importSrt, importAudioDub, exportPremiere, exportJianyingDraftIntl, filmRenderPreview, filmExportFinal, filmExportSrt, releaseTaskChannel } from '../../ipc/providers';
+import { getVideoServerBase, initVideoServer } from '../../ipc/client';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { ProgressMsg, VoiceOption, DubSegment } from '../../ipc/types';
+
+/** 本地视频预览源：桌面版经 fileserver（127.0.0.1）按需 Range 加载，浏览器态原样返回。 */
+function toVideoSrc(p: string): string {
+  if (!p) return '';
+  if (/^[a-zA-Z]:\\/.test(p) || p.startsWith('file://')) {
+    const base = getVideoServerBase();
+    if (base) return `${base}/file?path=${encodeURIComponent(p)}`;
+    return '';
+  }
+  if (p.startsWith('blob:') || p.startsWith('http://') || p.startsWith('https://')) return p;
+  return p;
+}
 
 interface Props {
   script: string;
@@ -133,6 +146,10 @@ export default function Step6DubAndCut({
   // 最近一次去重/质检结果
   const [qaIssues, setQaIssues] = useState<string[]>([]);
   const lastSnapshotRef = useRef<string>('');
+  // 视频预览源：源视频 / 合成成片 切换
+  const [videoSrc, setVideoSrc] = useState('');
+  const [compositeSrc, setCompositeSrc] = useState('');
+  const [previewMode, setPreviewMode] = useState<'source' | 'composite'>('source');
 
   // 从解说工作台带入新脚本时重新解析
   useEffect(() => {
@@ -149,6 +166,15 @@ export default function Step6DubAndCut({
     } catch { /* ignore */ }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
+
+  // 源视频预览源：桌面版经本地 fileserver 加载（异步获取 base 后计算）
+  useEffect(() => {
+    let cancelled = false;
+    initVideoServer().then(() => {
+      if (!cancelled) setVideoSrc(toVideoSrc((window as any).__vf_videoPath || ''));
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   // 写入快照（最多 8 条 + 持久化 localStorage）
   const saveSnapshot = (note: string) => {
@@ -233,17 +259,44 @@ export default function Step6DubAndCut({
     next.forEach((s, idx) => { s.index = idx; });
     persist(next);
   };
-  const generateSrt = () => {
+  // 弹出文件夹选择框，返回选定路径；用户取消则返回 null
+  const pickFolder = async (): Promise<string | null> => {
+    try {
+      const p = await openDialog({ directory: true, multiple: false }) as string | null;
+      return p || null;
+    } catch (e) {
+      actions.task('无法打开文件夹选择框：' + String(e), 100);
+      return null;
+    }
+  };
+
+  const generateSrt = async () => {
+    if (segs.length === 0) { actions.task('暂无分镜，无法生成 SRT', 100); return; }
+    const outDir = await pickFolder();
+    if (!outDir) { actions.task('已取消导出（未选择文件夹）', 100); return; }
+    setExportBusy(true); setExportMsg('导出 SRT');
     const srt = segs.map((s, i) => `${i + 1}\n${fmt(s.start)} --> ${fmt(s.end)}\n${s.text}\n`).join('\n');
-    const blob = new Blob([srt], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'subtitles.srt';
-    a.click();
-    URL.revokeObjectURL(url);
-    actions.task('SRT 字幕已下载', 100);
+    filmExportSrt(projectId || 'local', { content: srt, outDir }, (m: ProgressMsg) => {
+      setExportMsg(m.message || '');
+      if (m.status === 'done') {
+        setExportBusy(false);
+        const out = (m.payload as any)?.outPath || '';
+        actions.task('SRT 已导出：' + out, 100);
+        setExportMsg('导出完成：' + out);
+        try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
+      } else if (m.status === 'failed') {
+        setExportBusy(false);
+        actions.task('SRT 导出失败：' + (m.message || ''), 100);
+        setExportMsg('导出失败');
+        try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
+      }
+    }).catch((e) => { setExportBusy(false); actions.task('SRT 导出失败：' + String(e), 100); });
   };
   const exportJianying = async () => {
+    if (!projectId) { actions.task('缺少工程 ID', 100); return; }
+    if (segs.length === 0) { actions.task('暂无分镜，请先在解说工作台生成解说词', 100); return; }
+    const outDir = await pickFolder();
+    if (!outDir) { actions.task('已取消导出（未选择文件夹）', 100); return; }
     setExportBusy(true);
     setExportMsg('准备导出');
     try {
@@ -253,6 +306,7 @@ export default function Step6DubAndCut({
         videoPath: (window as any).__vf_videoPath || '',
         rangeStart,
         rangeEnd,
+        outDir,
       }, (m: ProgressMsg) => {
         setExportMsg(m.message || '');
         if (m.status === 'done') {
@@ -276,15 +330,17 @@ export default function Step6DubAndCut({
   };
 
   // 导出 Premiere：生成 .edl（CMX3600）+ 时间线 JSON + 字幕 SRT，三件套打包到一个 zip-like 文本
-  const exportPremiereClick = () => {
+  const exportPremiereClick = async () => {
     if (!projectId) { actions.task('缺少工程 ID', 100); return; }
     if (segs.length === 0) { actions.task('暂无分镜', 100); return; }
+    const outDir = await pickFolder();
+    if (!outDir) { actions.task('已取消导出（未选择文件夹）', 100); return; }
     setExportBusy(true); setExportMsg('导出 Premiere');
     exportPremiere(projectId, {
       script: segsToScript(segs),
       videoPath: (window as any).__vf_videoPath || '',
       rangeStart, rangeEnd,
-      followOriginal, flowerText, strictAlign,
+      followOriginal, flowerText, strictAlign, outDir,
     }, (m: ProgressMsg) => {
       setExportMsg(m.message || '');
       if (m.status === 'done') {
@@ -303,15 +359,17 @@ export default function Step6DubAndCut({
   };
 
   // 导出国际剪映（CapCut / Jianying International）：与国内版结构相同，路径用绝对路径
-  const exportJianyingIntlClick = () => {
+  const exportJianyingIntlClick = async () => {
     if (!projectId) { actions.task('缺少工程 ID', 100); return; }
     if (segs.length === 0) { actions.task('暂无分镜', 100); return; }
+    const outDir = await pickFolder();
+    if (!outDir) { actions.task('已取消导出（未选择文件夹）', 100); return; }
     setExportBusy(true); setExportMsg('导出国际剪映');
     exportJianyingDraftIntl(projectId, {
       script: segsToScript(segs),
       videoPath: (window as any).__vf_videoPath || '',
       rangeStart, rangeEnd,
-      followOriginal, flowerText, strictAlign,
+      followOriginal, flowerText, strictAlign, outDir,
     }, (m: ProgressMsg) => {
       setExportMsg(m.message || '');
       if (m.status === 'done') {
@@ -329,7 +387,68 @@ export default function Step6DubAndCut({
     }).catch((e) => { setExportBusy(false); actions.task('国际剪映导出失败：' + String(e), 100); });
   };
 
-  const onTool = (id: string) => {
+  // 预览成片：源视频 + 分段配音 + 烧录字幕 合成到指定文件夹（outDir）/data_dir/preview/<safe>.mp4，done 后用 fileserver 播放
+  const renderPreviewClick = async () => {
+    if (!projectId) { actions.task('缺少工程 ID', 100); return; }
+    if (segs.length === 0) { actions.task('暂无分镜', 100); return; }
+    const outDir = await pickFolder();
+    if (!outDir) { actions.task('已取消导出（未选择文件夹）', 100); return; }
+    setExportBusy(true); setExportMsg('合成预览成片中');
+    filmRenderPreview(projectId, {
+      script: segsToScript(segs),
+      videoPath: (window as any).__vf_videoPath || '',
+      mixVoice: true,
+      subtitleStyle,
+      outDir,
+    }, (m: ProgressMsg) => {
+      setExportMsg(m.message || '');
+      if (m.status === 'done') {
+        setExportBusy(false);
+        const out = (m.payload as any)?.outPath || '';
+        if (out) { setCompositeSrc(toVideoSrc(out)); setPreviewMode('composite'); }
+        actions.task('预览成片已生成', 100);
+        setExportMsg(out ? '预览成片已生成' : '预览合成完成但无输出路径');
+        try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
+      } else if (m.status === 'failed') {
+        setExportBusy(false);
+        actions.task('预览合成失败：' + (m.message || ''), 100);
+        setExportMsg('预览合成失败');
+        try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
+      }
+    }).catch((e) => { setExportBusy(false); actions.task('预览合成失败：' + String(e), 100); });
+  };
+
+  // 导出成片 MP4：与预览同一管线，输出到指定文件夹（outDir）/data_dir/export/<safe>_<ts>.mp4
+  const exportFinalClick = async () => {
+    if (!projectId) { actions.task('缺少工程 ID', 100); return; }
+    if (segs.length === 0) { actions.task('暂无分镜', 100); return; }
+    const outDir = await pickFolder();
+    if (!outDir) { actions.task('已取消导出（未选择文件夹）', 100); return; }
+    setExportBusy(true); setExportMsg('导出成片中');
+    filmExportFinal(projectId, {
+      script: segsToScript(segs),
+      videoPath: (window as any).__vf_videoPath || '',
+      mixVoice: true,
+      subtitleStyle,
+      outDir,
+    }, (m: ProgressMsg) => {
+      setExportMsg(m.message || '');
+      if (m.status === 'done') {
+        setExportBusy(false);
+        const out = (m.payload as any)?.outPath || '';
+        actions.task('成片已导出：' + out, 100);
+        setExportMsg('导出完成：' + out);
+        try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
+      } else if (m.status === 'failed') {
+        setExportBusy(false);
+        actions.task('成片导出失败：' + (m.message || ''), 100);
+        setExportMsg('导出失败');
+        try { releaseTaskChannel(m.taskId || ''); } catch { /* ignore */ }
+      }
+    }).catch((e) => { setExportBusy(false); actions.task('成片导出失败：' + String(e), 100); });
+  };
+
+  const onTool = async (id: string) => {
     switch (id) {
       case 'export_srt':
         generateSrt();
@@ -624,11 +743,13 @@ export default function Step6DubAndCut({
           }
         }).catch((e) => { setExportBusy(false); actions.task('翻译失败：' + String(e), 100); });
         break;
-      case 'export_jy':
-        // 导出剪映草稿：生成 jianying_drafts/<project>_<ts>/
+      case 'export_jy': {
+        // 导出剪映草稿：弹出文件夹选择框，写入选定文件夹
         if (!projectId) { actions.task('缺少工程 ID', 100); break; }
+        const outDir = await pickFolder();
+        if (!outDir) { actions.task('已取消导出（未选择文件夹）', 100); break; }
         setExportBusy(true); setExportMsg('导出剪映草稿中');
-        exportJianyingDraft(projectId, { script: segsToScript(segs), videoPath: (window as any).__vf_videoPath || '', rangeStart, rangeEnd }, (m: ProgressMsg) => {
+        exportJianyingDraft(projectId, { script: segsToScript(segs), videoPath: (window as any).__vf_videoPath || '', rangeStart, rangeEnd, outDir }, (m: ProgressMsg) => {
           setExportMsg(m.message || '');
           if (m.status === 'done') {
             setExportBusy(false);
@@ -642,6 +763,7 @@ export default function Step6DubAndCut({
           }
         }).catch((e) => { setExportBusy(false); actions.task('剪映草稿失败：' + String(e), 100); });
         break;
+      }
       default:
         actions.task(`${TOOLBAR.find((t) => t.id === id)?.label || id}（M5 实现）`, 100);
     }
@@ -681,7 +803,35 @@ export default function Step6DubAndCut({
         {/* 左侧：视频预览 */}
         <div className="film-step6__left">
           <div className="film-step6__video">
-            <div className="film-step6__video-frame">▶ 视频预览</div>
+            <div className="film-step6__video-bar">
+              <div className="film-step6__video-tabs">
+                <button
+                  className={'film-step6__vtab' + (previewMode === 'source' ? ' active' : '')}
+                  onClick={() => setPreviewMode('source')}
+                >源视频</button>
+                {compositeSrc && (
+                  <button
+                    className={'film-step6__vtab' + (previewMode === 'composite' ? ' active' : '')}
+                    onClick={() => setPreviewMode('composite')}
+                  >合成成片</button>
+                )}
+              </div>
+              <button
+                className="btn sm film-step6__preview-btn"
+                onClick={renderPreviewClick}
+                disabled={exportBusy || segs.length === 0}
+                title="源视频 + 分段配音 + 烧录字幕 合成预览"
+              >▶ 预览成片</button>
+            </div>
+            <div className="film-step6__video-frame">
+              {previewMode === 'composite' && compositeSrc ? (
+                <video key={compositeSrc} className="film-step6__video-el" src={compositeSrc} controls autoPlay />
+              ) : videoSrc ? (
+                <video key={videoSrc} className="film-step6__video-el" src={videoSrc} controls />
+              ) : (
+                <div className="film-step6__video-empty">▶ 视频预览（源视频未加载）</div>
+              )}
+            </div>
             <div className="film-step6__timeline">
               <div className="film-step6__timeline-handle" />
             </div>
@@ -689,7 +839,7 @@ export default function Step6DubAndCut({
               <div>视频文件：<span className="muted">{videoName || '-'}</span></div>
               <div>分镜数：<span className="muted">{segs.length}</span></div>
               <div>成片约：<span className="muted">{fmtDur(rangeEnd - rangeStart)}</span></div>
-              <div>状态：<span className="muted">就位</span></div>
+              <div>状态：<span className="muted">{previewMode === 'composite' && compositeSrc ? '合成成片' : '源视频就位'}</span></div>
             </div>
           </div>
         </div>
@@ -781,6 +931,7 @@ export default function Step6DubAndCut({
           </button>
           <button className="btn sm" onClick={exportPremiereClick}>📤 导出 Premiere</button>
           <button className="btn sm" onClick={exportJianyingIntlClick}>📤 导出国际剪映</button>
+          <button className="btn sm" onClick={exportFinalClick} disabled={exportBusy || segs.length === 0} title="源视频 + 分段配音 + 烧录字幕 合成最终 MP4">📤 导出成片</button>
           <button className="btn sm ghost" onClick={generateSrt}>💾 导出 SRT</button>
         </div>
       </div>

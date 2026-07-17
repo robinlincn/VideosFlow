@@ -76,15 +76,58 @@ impl FfMpeg {
 
     pub fn mux_cmd(&self, video: &str, audio: &str, output: &str) -> Command {
         let mut c = Command::new(&self.path);
+        // 关键：-map 0:v:0 -map 1:a:0 强制「视频取自输入0、配音取自输入1(wav)」。
+        // 若不指定，ffmpeg 默认从第一个输入（视频文件本身含原声）取音轨，
+        // 导致 TTS 配音被整体丢弃、成片保留原声。
         c.args([
-            "-i", video, "-i", audio, "-c:v", "copy", "-c:a", "aac", "-shortest", output,
+            "-i", video, "-i", audio,
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "copy", "-c:a", "aac", "-shortest", output,
         ]);
         c
     }
 
     pub fn burn_ass_cmd(&self, input: &str, ass: &str, output: &str) -> Command {
         let mut c = Command::new(&self.path);
-        c.args(["-i", input, "-vf", &format!("ass={ass}"), output]);
+        // Windows 路径含盘符 C: 与反斜杠 \，ffmpeg 的 ass/subtitles 滤镜会把 ':' 当作协议
+        // 分隔符、把 '\' 当作转义符，导致字幕烧录静默失败（最终输出无字幕）。统一转正斜杠
+        // 并对盘符冒号转义，再用 subtitles=filename='...' 形式包裹，跨平台稳健。
+        let normalized = ass.replace('\\', "/");
+        let escaped = normalized.replace(":", "\\:");
+        let filter = format!("subtitles=filename='{}'", escaped);
+        // 显式只取视频+音频流，丢弃源视频自带的字幕流（避免旧字幕轨道被带入成片），
+        // 视频因 -vf 必须重编码。0:a? 表示音频可选（无音轨也不报错）。
+        c.args([
+            "-i", input,
+            "-vf", &filter,
+            "-map", "0:v:0", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac",
+            output,
+        ]);
+        c
+    }
+
+    /// 烧录解说词字幕（drawtext 滤镜版）。比 ASS 更可靠：不依赖 libass、无 ASS CSV 格式陷阱、
+    /// 任何分辨率/编码都能稳定渲染。text_file 为 UTF-8 文本文件（直接写 s.text 即可，无需转义）。
+    /// 半透明黑底框确保任何背景上都清晰可读。
+    pub fn burn_subtitle_cmd(&self, input: &str, text_file: &str, output: &str) -> Command {
+        let mut c = Command::new(&self.path);
+        // 字体文件：Windows 自带 Microsoft YaHei（msyh.ttc）。textfile 路径做冒号转义。
+        let font = "C\\:/Windows/Fonts/msyh.ttc";
+        let normalized = text_file.replace('\\', "/");
+        let escaped_text = normalized.replace(":", "\\:");
+        let filter = format!(
+            "drawtext=fontfile='{}':textfile='{}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=h-text_h-30",
+            font, escaped_text
+        );
+        c.args([
+            "-i", input,
+            "-vf", &filter,
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac",
+            output,
+        ]);
         c
     }
 
