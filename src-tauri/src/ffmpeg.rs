@@ -131,6 +131,56 @@ impl FfMpeg {
         c
     }
 
+    /// 探测音频/视频时长（秒）。优先 ffprobe，失败回退解析 WAV 头（TTS 返回的多为 PCM wav）。
+    pub fn probe_duration(&self, path: &str) -> Option<f64> {
+        let probe = self.path.to_string_lossy().replace("ffmpeg", "ffprobe");
+        if let Ok(o) = Command::new(&probe)
+            .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", path])
+            .output()
+        {
+            if let Ok(s) = String::from_utf8_lossy(&o.stdout).trim().parse::<f64>() {
+                if s > 0.0 { return Some(s); }
+            }
+        }
+        parse_wav_duration(path)
+    }
+
+    /// 将音频归一化到目标时长（target_dur 秒），使配音与视频切片严格等长、消除累积漂移。
+    /// - 配音偏短：静音补齐到 target_dur
+    /// - 配音偏长：加速（atempo 链）到 target_dur，保留全部台词
+    /// - 时长已接近：直接拷贝
+    pub fn normalize_audio_to(&self, input: &str, output: &str, src_dur: f64, target_dur: f64) -> Command {
+        let mut c = Command::new(&self.path);
+        c.args(["-i", input]);
+        if target_dur <= 0.0 || (target_dur - src_dur).abs() < 0.05 {
+            c.args(["-c:a", "copy", output]);
+            return c;
+        }
+        let filter = if target_dur > src_dur {
+            // 静音补齐到目标时长（apad 延展 + atrim 精确截断）
+            format!("apad,atrim=0:{:.3}", target_dur)
+        } else {
+            // 加速到目标时长保留全部台词（atempo 链支持任意倍率），再精确截断
+            format!("{},atrim=0:{:.3}", Self::atempo_filter(target_dur / src_dur), target_dur)
+        };
+        c.args([
+            "-af", &filter,
+            "-c:a", "pcm_s16le", "-ar", "24000", "-ac", "1",
+            output,
+        ]);
+        c
+    }
+
+    /// 生成 atempo 滤镜链：ffmpeg atempo 接受 (0.5, 2.0]，超出范围需多级串联。
+    fn atempo_filter(rate: f64) -> String {
+        let mut filters: Vec<String> = Vec::new();
+        let mut r = rate;
+        while r > 2.0 { filters.push("atempo=2.0".to_string()); r /= 2.0; }
+        while r < 0.5 { filters.push("atempo=0.5".to_string()); r /= 0.5; }
+        filters.push(format!("atempo={:.4}", r));
+        filters.join(",")
+    }
+
     /// 精确切点：-ss S -to E -i in -c copy。
     pub fn segment_cmd(&self, input: &str, start: f64, end: f64, output: &str) -> Command {
         let mut c = Command::new(&self.path);
@@ -184,6 +234,71 @@ impl FfMpeg {
         } else {
             c.args(["-c:v", "libx264", "-crf", "20", "-c:a", "aac", output]);
         }
+        c
+    }
+
+    /// 由单张首帧图生成「运镜视频片段」（Ken Burns 缓慢推近）。离线可用，无需视频大模型。
+    /// 输出固定 1920x1080 / 30fps / yuv420p，时长 dur 秒，便于后续 concat copy。
+    pub fn gen_clip_single_cmd(&self, image: &str, dur: f64, output: &str) -> Command {
+        let mut c = Command::new(&self.path);
+        let d = format!("{:.3}", dur.max(1.0));
+        c.args(["-loop", "1", "-i", image]);
+        c.args([
+            "-vf",
+            "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,zoompan=z='min(zoom+0.0015,1.25)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':fps=30:s=1920x1080",
+        ]);
+        c.args([
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", "-t", &d, output,
+        ]);
+        c
+    }
+
+    /// 由首帧 + 尾帧两张图生成「首尾帧视频」，中间以淡入淡出（xfade）过渡。离线可用。
+    pub fn gen_clip_xfade_cmd(&self, a: &str, b: &str, dur: f64, output: &str) -> Command {
+        let d = dur.max(2.0);
+        let x = (d / 2.0).min(1.0); // 过渡时长（秒）
+        let half = (d + x) / 2.0; // 每段时长，使 xfade 后总时长恰为 d
+        let offset = half - x; // 过渡起始点
+        let mut c = Command::new(&self.path);
+        c.args(["-loop", "1", "-i", a, "-loop", "1", "-i", b]);
+        c.args([
+            "-filter_complex",
+            &format!(
+                "[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,trim=duration={half:.3},setpts=PTS-STARTPTS[f0];\
+                 [1:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,trim=duration={half:.3},setpts=PTS-STARTPTS[f1];\
+                 [f0][f1]xfade=transition=fade:duration={x:.3}:offset={offset:.3}[fv]"
+            ),
+        ]);
+        c.args([
+            "-map", "[fv]", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", "-t",
+            &format!("{d:.3}"), output,
+        ]);
+        c
+    }
+
+    /// 合成单个分镜成片片段：视频（来自 frames 片段）+ 可选配音（wav）+ 烧录该镜台词字幕（drawtext）。
+    /// 统一 1920x1080 / 30fps / yuv420p，方便最终 concat copy 拼接。sub_text_file 为台词 UTF-8 文本。
+    pub fn compose_seg_cmd(&self, video: &str, audio: Option<&str>, sub_text_file: &str, output: &str) -> Command {
+        let font = "C\\:/Windows/Fonts/msyh.ttc";
+        let sub = sub_text_file.replace('\\', "/").replace(":", "\\:");
+        let filter = format!(
+            "scale=1920:1080,drawtext=fontfile='{}':textfile='{}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=h-text_h-30",
+            font, sub
+        );
+        let mut c = Command::new(&self.path);
+        c.args(["-i", video]);
+        if let Some(a) = audio {
+            c.args(["-i", a]);
+        }
+        c.args([
+            "-vf", &filter, "-c:v", "libx264", "-crf", "20", "-pix_fmt", "yuv420p", "-r", "30",
+        ]);
+        if audio.is_some() {
+            c.args(["-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-ar", "44100", "-shortest"]);
+        } else {
+            c.args(["-an"]);
+        }
+        c.arg(output);
         c
     }
 }
@@ -443,4 +558,30 @@ async fn download_first_launch(data_dir: &std::path::Path) -> Result<(), String>
         Ok(s) => Err(format!("解包 FFmpeg 失败，tar 退出码: {s}")),
         Err(e) => Err(format!("解包 FFmpeg 失败（缺少 tar）: {e}")),
     }
+}
+
+/// 解析 PCM WAV 文件头得到时长（秒）。TTS 返回的 wav 多为 PCM，无需外部依赖即可估算。
+fn parse_wav_duration(path: &str) -> Option<f64> {
+    let data = std::fs::read(path).ok()?;
+    if data.len() < 44 { return None; }
+    if &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" { return None; }
+    let num_channels = u16::from_le_bytes([data[22], data[23]]) as f64;
+    let sample_rate = u32::from_le_bytes([data[24], data[25], data[26], data[27]]) as f64;
+    let bits = u16::from_le_bytes([data[34], data[35]]) as f64;
+    // 定位 data 块大小
+    let mut i = 12usize;
+    let mut data_size = 0u32;
+    while i + 8 <= data.len() {
+        let ck = &data[i..i + 4];
+        let sz = u32::from_le_bytes([data[i + 4], data[i + 5], data[i + 6], data[i + 7]]);
+        if ck == b"data" {
+            data_size = sz;
+            break;
+        }
+        i += 8 + sz as usize;
+    }
+    if sample_rate <= 0.0 || num_channels <= 0.0 || bits <= 0.0 { return None; }
+    let bytes_per_sec = sample_rate * num_channels * (bits / 8.0);
+    if bytes_per_sec <= 0.0 { return None; }
+    Some(data_size as f64 / bytes_per_sec)
 }

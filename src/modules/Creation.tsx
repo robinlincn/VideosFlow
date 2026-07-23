@@ -1,6 +1,10 @@
+import { useEffect, useState } from 'react';
 import { useApp } from '../state/AppContext';
 import { cSteps, stylePresets, refCats } from '../data/mock';
 import type { CreationProject } from '../ipc/types';
+import { getVideoServerBase, initVideoServer } from '../ipc/client';
+import { listVoices } from '../ipc/providers';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
 const STEP_DESC: Record<string, string> = {
   req: '描述大体需求，自动写文案',
@@ -8,10 +12,33 @@ const STEP_DESC: Record<string, string> = {
   human: '口语化去 AI 味',
   story: '生成可编辑的分镜文案',
   image: '按分镜生成图片（可加分类参考图）',
-  frames: '按图片与分镜生成首尾帧视频（M5 待落地）',
-  voice: '多声音配音 + 字幕（M5 待落地）',
-  export: '合成与导出（M5 待落地）',
+  frames: '按首帧图生成首尾帧视频（可加尾帧做过渡）',
+  voice: '多声音配音 + 字幕',
+  export: '合成与导出成片',
 };
+
+/** 本地媒体预览源：桌面版经 fileserver（127.0.0.1）按需 Range 加载，浏览器态原样返回。 */
+function toSrc(p: string): string {
+  if (!p) return '';
+  if (/^[a-zA-Z]:\\/.test(p) || p.startsWith('file://')) {
+    const base = getVideoServerBase();
+    return base ? `${base}/file?path=${encodeURIComponent(p)}` : '';
+  }
+  if (p.startsWith('blob:') || p.startsWith('http://') || p.startsWith('https://')) return p;
+  return p;
+}
+
+/** 把分镜源统一为「DB 态优先、编辑态回退」，并附带数组下标 i。 */
+type ViewShot = { index?: number; desc: string; dialogue: string; dur: number; cam: string; start?: number; end?: number; style?: string; _i: number };
+function useShots(): { shots: ViewShot[]; ready: boolean } {
+  const { state } = useApp();
+  const { creationSb, cState } = state;
+  const [ready, setReady] = useState(false);
+  useEffect(() => { initVideoServer().then(() => setReady(true)); }, []);
+  const raw = (creationSb?.shots && creationSb.shots.length > 0) ? creationSb.shots : cState.story;
+  const shots = raw.map((s, i) => ({ ...(s as object), _i: i }) as ViewShot);
+  return { shots, ready };
+}
 
 export default function Creation() {
   const { state, actions } = useApp();
@@ -47,9 +74,9 @@ export default function Creation() {
           {cStage === 'human' && <HumanView proj={cur} />}
           {cStage === 'story' && <StoryView proj={cur} />}
           {cStage === 'image' && <ImageView proj={cur} />}
-          {cStage === 'frames' && <div className="empty-hint">首尾帧视频生成在 M5 落地（M4 范围外）。</div>}
-          {cStage === 'voice' && <div className="empty-hint">多声音配音 + 字幕在 M5 落地（M4 范围外）。</div>}
-          {cStage === 'export' && <div className="empty-hint">合成导出在 M5 落地（M4 范围外）。</div>}
+          {cStage === 'frames' && <FramesView proj={cur} />}
+          {cStage === 'voice' && <VoiceView proj={cur} />}
+          {cStage === 'export' && <ExportView proj={cur} />}
         </>
       )}
     </div>
@@ -142,7 +169,6 @@ function StoryView({ proj }: { proj: CreationProject }) {
   const { cState, creationSb } = state;
   const sr = cState.styleRef || '现实';
   const sp = stylePresets[sr] || stylePresets['现实'];
-  // 优先用 storyboard.shots（DB 真实态），fallback cState.story
   const shots = (creationSb?.shots && creationSb.shots.length > 0) ? creationSb.shots : cState.story;
   return (
     <div>
@@ -187,10 +213,8 @@ function StoryView({ proj }: { proj: CreationProject }) {
 function ImageView({ proj }: { proj: CreationProject }) {
   const { state, actions } = useApp();
   const { cState, creationSb, creationAssets } = state;
-  // 优先用 storyboard.shots（DB 真实态），fallback cState.story（编辑态）
   const shots = (creationSb?.shots && creationSb.shots.length > 0) ? creationSb.shots : cState.story;
   const assetsByShot: Record<number, { path: string; size?: number }> = {};
-  creationAssets.forEach((a) => { assetsByShot[a.shotId] = { path: a.path }; });
   creationAssets.forEach((a) => { assetsByShot[a.shotId] = { path: a.path }; });
   const onAddRef = (i: number) => {
     const inp = document.createElement('input');
@@ -251,6 +275,199 @@ function ImageView({ proj }: { proj: CreationProject }) {
           );
         })}
       </div>
+      <div style={{ marginTop: 14, display: 'flex', gap: 8 }}>
+        <button className="btn" disabled={!creationAssets.some((a) => a.kind === 'image')} onClick={() => actions.goFrames()}>下一步：首尾帧视频 →</button>
+      </div>
+    </div>
+  );
+}
+
+// ===========================================================================
+// M5-① 首尾帧视频
+// ===========================================================================
+function FramesView({ proj }: { proj: CreationProject }) {
+  const { state, actions } = useApp();
+  const { creationAssets, creationManifest, cState } = state;
+  const { shots, ready } = useShots();
+  const assetsByShot: Record<number, string> = {};
+  creationAssets.forEach((a) => { if (a.kind === 'image') assetsByShot[a.shotId] = a.path; });
+  const man = creationManifest;
+
+  const onPickTail = (shotIdx: number) => {
+    openDialog({ multiple: false, filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }] }).then((p) => {
+      if (p && !Array.isArray(p)) actions.setCreationTail(shotIdx, p as string);
+    });
+  };
+
+  if (shots.length === 0) return <div className="empty-hint">请先在「分镜」与「图片」步准备好镜头与首帧图。</div>;
+
+  const generatedCount = shots.filter((s) => man && man.clips[String(s.index ?? s._i)]).length;
+  const allHaveImg = shots.every((s) => assetsByShot[s.index ?? s._i]);
+
+  return (
+    <div>
+      <div className="card" style={{ marginBottom: 14, padding: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <div className="muted sm">共 {shots.length} 镜 · 已生成片段 {generatedCount}/{shots.length}</div>
+        <div style={{ flex: 1 }} />
+        <button className="btn" disabled={!allHaveImg} onClick={() => actions.genFrames(proj.id)}>🎬 生成首尾帧视频</button>
+        <button className="btn sm ghost" disabled={generatedCount === 0} onClick={() => actions.goVoice()}>下一步：配音+字幕 →</button>
+      </div>
+      {!allHaveImg && (
+        <div className="muted sm" style={{ marginBottom: 10, color: 'var(--warn, #b45309)' }}>⚠ 还有镜头未生成首帧图，请回到「图片」步生成后再生成视频。</div>
+      )}
+
+      <div className="gen-grid">
+        {shots.map((s) => {
+          const shotIdx = s.index ?? s._i;
+          const img = assetsByShot[shotIdx];
+          const clip = man?.clips[String(shotIdx)];
+          const tail = cState.tails[shotIdx];
+          return (
+            <div key={s._i} className="frame-card">
+              <div className={'fr ' + (img ? '' : 'empty')} style={img ? { backgroundImage: `url(${ready ? toSrc(img) : ''})`, backgroundSize: 'cover', backgroundPosition: 'center' } : undefined}>
+                {!img && '缺少首帧图'}
+                {img && <span className="fr-badge">镜头 {s._i + 1} 首帧</span>}
+              </div>
+              <div className="fb" style={{ flexWrap: 'wrap' }}>
+                <span className="muted sm">镜头 {s._i + 1} · {s.dur || 4}s</span>
+                <button className="btn sm ghost" onClick={() => onPickTail(shotIdx)}>🖼 尾帧{tail ? '✓' : ''}</button>
+                {tail && <button className="btn sm ghost" onClick={() => actions.clearCreationTail(shotIdx)}>✕ 取消尾帧</button>}
+              </div>
+              {clip ? (
+                <video key={clip} className="fr-video" controls src={ready ? toSrc(clip) : ''} style={{ width: '100%', borderRadius: 8, marginTop: 8 }} />
+              ) : (
+                <div className="muted sm" style={{ padding: '6px 0', textAlign: 'center' }}>未生成片段</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ===========================================================================
+// M5-② 配音 + 字幕
+// ===========================================================================
+const VOICE_FALLBACK = [
+  { id: 'mimo_default', name: '默认音色（mimo_default）' },
+  { id: 'mimo_zh_female', name: '知性女声（如失败用默认）' },
+  { id: 'mimo_zh_male', name: '磁性男声（如失败用默认）' },
+  { id: 'mimo_warm_male', name: '温暖男声（如失败用默认）' },
+];
+
+function VoiceView({ proj }: { proj: CreationProject }) {
+  const { state, actions } = useApp();
+  const { creationManifest, cState } = state;
+  const { shots, ready } = useShots();
+  const [voices, setVoices] = useState<{ id: string; name: string }[]>(VOICE_FALLBACK);
+  useEffect(() => {
+    listVoices().then((v) => { if (v && v.length) setVoices(v.map((x) => ({ id: x.id, name: x.name }))); }).catch(() => undefined);
+  }, []);
+  const man = creationManifest;
+
+  if (shots.length === 0) return <div className="empty-hint">请先生成分镜与首尾帧视频。</div>;
+
+  const dubbedCount = shots.filter((s) => man && man.audios[String(s.index ?? s._i)]).length;
+
+  return (
+    <div>
+      <div className="card" style={{ marginBottom: 14, padding: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <div className="field" style={{ margin: 0, minWidth: 240 }}>
+          <label>配音音色</label>
+          <select value={cState.voiceName} onChange={(e) => actions.setCreationVoice(e.target.value)}>
+            {voices.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+          </select>
+        </div>
+        <div className="muted sm">共 {shots.length} 镜 · 已配音 {dubbedCount}/{shots.length}</div>
+        <div style={{ flex: 1 }} />
+        <button className="btn" onClick={() => actions.genVoice(proj.id)}>🔊 生成配音</button>
+        <button className="btn sm ghost" disabled={shots.length === 0} onClick={() => actions.downloadCreationSrt(proj.id)}>⬇ 下载字幕 SRT</button>
+        <button className="btn sm ghost" disabled={dubbedCount === 0} onClick={() => actions.goExport()}>下一步：导出 →</button>
+      </div>
+
+      <div className="gen-grid">
+        {shots.map((s) => {
+          const shotIdx = s.index ?? s._i;
+          const wav = man?.audios[String(shotIdx)];
+          return (
+            <div key={s._i} className="frame-card">
+              <div className="fb" style={{ alignItems: 'flex-start', flexDirection: 'column', gap: 6 }}>
+                <span className="tag spoken">镜头 {s._i + 1} · 台词</span>
+                <div className="script-box" style={{ fontSize: 13, margin: 0, maxHeight: 96, overflow: 'auto' }}>{s.dialogue || <span className="muted">（无台词，跳过）</span>}</div>
+              </div>
+              {wav ? (
+                <div style={{ padding: '8px 0' }}>
+                  <audio key={wav} controls src={ready ? toSrc(wav) : ''} style={{ width: '100%' }} />
+                </div>
+              ) : (
+                <div className="muted sm" style={{ padding: '8px 0', textAlign: 'center' }}>未生成配音</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ===========================================================================
+// M5-③ 导出成片
+// ===========================================================================
+const SUB_STYLES = [
+  { id: 'standard', name: '标准白字（黑描边）' },
+  { id: 'highlight', name: '重点强调（黄底）' },
+  { id: 'big', name: '大字标题' },
+];
+
+function ExportView({ proj }: { proj: CreationProject }) {
+  const { state, actions } = useApp();
+  const { creationManifest, cState } = state;
+  const { shots, ready } = useShots();
+  const [subStyle, setSubStyle] = useState('standard');
+  const man = creationManifest;
+  const final = man?.exported || cState.exportedPath;
+
+  if (shots.length === 0) return <div className="empty-hint">请先完成分镜、首尾帧视频与配音。</div>;
+
+  const clipCount = shots.filter((s) => man && man.clips[String(s.index ?? s._i)]).length;
+  const audioCount = shots.filter((s) => man && man.audios[String(s.index ?? s._i)]).length;
+
+  return (
+    <div>
+      <div className="card" style={{ marginBottom: 14, padding: 14 }}>
+        <div className="sec-title">合成设置</div>
+        <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', alignItems: 'end' }}>
+          <div className="field">
+            <label>字幕样式</label>
+            <select value={subStyle} onChange={(e) => setSubStyle(e.target.value)}>
+              {SUB_STYLES.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </div>
+          <div className="muted sm">
+            片段 {clipCount}/{shots.length} · 配音 {audioCount}/{shots.length}
+          </div>
+        </div>
+        <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button className="btn" disabled={clipCount === 0} onClick={() => actions.exportCreation(proj.id, subStyle)}>📦 导出成片 MP4</button>
+          <button className="btn sm ghost" disabled={shots.length === 0} onClick={() => actions.downloadCreationSrt(proj.id)}>⬇ 下载字幕 SRT</button>
+          <button className="btn sm ghost" onClick={() => actions.goVoice()}>← 返回配音</button>
+        </div>
+      </div>
+
+      {final ? (
+        <div className="card" style={{ padding: 14 }}>
+          <div className="sec-title">成片预览</div>
+          <video key={final} controls src={ready ? toSrc(final) : ''} style={{ width: '100%', maxHeight: 520, borderRadius: 10, background: '#000' }} />
+          <div className="muted sm" style={{ marginTop: 8 }}>路径：{final}</div>
+          <div style={{ marginTop: 10, display: 'flex', gap: 8 }}>
+            <a className="btn sm" href={ready ? toSrc(final) : '#'} download onClick={(e) => { if (!ready) e.preventDefault(); }}>⬇ 下载成片</a>
+            <button className="btn sm ghost" onClick={() => actions.downloadCreationSrt(proj.id)}>⬇ 下载字幕 SRT</button>
+          </div>
+        </div>
+      ) : (
+        <div className="empty-hint">尚未导出成片。点击「导出成片 MP4」开始合成（拼接镜头 + 混入配音 + 烧录字幕）。</div>
+      )}
     </div>
   );
 }

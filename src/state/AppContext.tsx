@@ -2,7 +2,7 @@ import React, { createContext, useContext, useRef, useState, useEffect } from 'r
 import {
   AppState, ModuleKey, ProviderCfg,
 } from '../data/mock';
-import type { ProviderRow, ProgressMsg, FilmCategory, FilmProject, TimelineEnvelope, TimelineClip } from '../ipc/types';
+import type { ProviderRow, ProgressMsg, FilmCategory, FilmProject, TimelineEnvelope, TimelineClip, CreationManifest } from '../ipc/types';
 import {
   initialFilmCats, initialFilmProjects, initialEditorState, initialSpokenVideos,
   initialSettings, initialCreation, defaultSubs, type EditorState as EditorStateType,
@@ -21,6 +21,7 @@ import {
   loadCreationProjects, getCreationProject, createCreationProject, updateCreationProject, deleteCreationProject,
   loadStoryboard, saveStoryboard, loadGeneratedAssets,
   submitScriptWrite, submitScriptHumanize, submitStoryboardGen, submitImageGen,
+  getCreationManifest, submitCreationFrames, submitCreationVoice, submitCreationExport,
   submitFilmScriptGen,
 } from '../ipc/providers';
 import type { SpokenVideo as SpokenVideoDb, SpokenEdit, SpokenAsset, CreationProject, Shot, GeneratedAsset } from '../ipc/types';
@@ -46,6 +47,7 @@ const initialState: AppState = {
   creationSel: null,
   creationSb: null,
   creationAssets: [],
+  creationManifest: null,
 };
 
 type SetState = React.Dispatch<React.SetStateAction<AppState>>;
@@ -715,16 +717,18 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
 
   const refreshCreation = async (projectId: string) => {
     try {
-      const [proj, sb, assets] = await Promise.all([
+      const [proj, sb, assets, manifest] = await Promise.all([
         getCreationProject(projectId),
         loadStoryboard(projectId),
         loadGeneratedAssets(projectId),
+        getCreationManifest(projectId),
       ]);
       set((s) => ({
         ...s,
         creationProjects: s.creationProjects.map((p) => (p.id === projectId ? proj : p)),
         creationSb: sb,
         creationAssets: assets,
+        creationManifest: manifest,
       }));
     } catch { /* 静默 */ }
   };
@@ -896,17 +900,118 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
     }).catch((e) => task('图片生成失败：' + String(e), 100));
   };
 
-  /** M5 暂保留占位（M4 不涉及首尾帧/配音/导出） */
-  const genFrames = (_i: number) => task('M5 待落地', 100);
-  const genVoice = () => task('M5 待落地', 100);
-  const toggleVoice = (n: string) => set((s) => {
-    const ex = s.cState.voices.find((x) => x.name === n);
-    return { ...s, cState: { ...s.cState, voices: ex ? s.cState.voices.filter((x) => x.name !== n) : [...s.cState.voices, { name: n, ip: n }] } };
-  });
-  const setVoiceIP = (n: string, v: string) => set((s) => ({
-    ...s, cState: { ...s.cState, voices: s.cState.voices.map((x) => x.name === n ? { ...x, ip: v } : x) },
+  /** M5-① 首尾帧视频：把各镜首帧图（图片步产物）生成运镜片段，可选尾帧做 crossfade。 */
+  const genFrames = (projectId: string) => {
+    const tails = get().cState.tails || {};
+    task('生成首尾帧视频中…', 10);
+    submitCreationFrames(projectId, tails, (m: ProgressMsg) => {
+      task(m.message || '生成中…', m.progress);
+      if (m.status === 'done') {
+        refreshCreation(projectId).then(() => {
+          const man = get().creationManifest;
+          const shots = get().cState.story;
+          const frames: Record<number, boolean> = {};
+          shots.forEach((sh, i) => {
+            const idx = (sh.index ?? i);
+            frames[idx] = !!(man && man.clips[String(idx)]);
+          });
+          set((s) => ({ ...s, cState: { ...s.cState, frames } }));
+          task('首尾帧视频生成完成 ✓', 100);
+          window.setTimeout(() => task('空闲', 0), 1800);
+        });
+      } else if (m.status === 'failed') {
+        task('生成失败：' + (m.message || ''), 100);
+      }
+    }).catch((e) => task('生成失败：' + String(e), 100));
+  };
+
+  /** M5-② 配音：逐镜台词走 TTS 生成 wav（统一音色 voiceName）。 */
+  const genVoice = (projectId: string) => {
+    const voice = get().cState.voiceName || 'mimo_default';
+    task('生成配音中…', 10);
+    submitCreationVoice(projectId, voice, (m: ProgressMsg) => {
+      task(m.message || '生成中…', m.progress);
+      if (m.status === 'done') {
+        refreshCreation(projectId).then(() => {
+          const man = get().creationManifest;
+          const shots = get().cState.story;
+          const ok = shots.some((sh, i) => {
+            const idx = (sh.index ?? i);
+            return !!(man && man.audios[String(idx)]);
+          });
+          set((s) => ({ ...s, cState: { ...s.cState, voice: { ok } } }));
+          task('配音生成完成 ✓', 100);
+          window.setTimeout(() => task('空闲', 0), 1800);
+        });
+      } else if (m.status === 'failed') {
+        task('配音失败：' + (m.message || ''), 100);
+      }
+    }).catch((e) => task('配音失败：' + String(e), 100));
+  };
+
+  /** 上传单镜尾帧图（绝对路径），用于首尾帧视频的 crossfade 过渡。 */
+  const setCreationTail = (i: number, path: string) => set((s) => ({
+    ...s, cState: { ...s.cState, tails: { ...s.cState.tails, [i]: path } },
   }));
-  const exportCreationJianYing = () => task('M5 待落地', 100);
+  const clearCreationTail = (i: number) => set((s) => {
+    const next = { ...s.cState.tails };
+    delete next[i];
+    return { ...s, cState: { ...s.cState, tails: next } };
+  });
+
+  /** 选择配音音色（全局统一用于本工程）。 */
+  const setCreationVoice = (v: string) => set((s) => ({ ...s, cState: { ...s.cState, voiceName: v } }));
+
+  /** M5-③ 导出成片：拼接 + 混音 + 烧字幕 → 最终 MP4。 */
+  const exportCreation = (projectId: string, subtitleStyle: string) => {
+    task('导出成片中…', 5);
+    submitCreationExport(projectId, subtitleStyle, (m: ProgressMsg) => {
+      task(m.message || '导出中…', m.progress);
+      if (m.status === 'done') {
+        const outPath = (m.payload as any)?.outPath || '';
+        refreshCreation(projectId).then(() => {
+          set((s) => ({ ...s, cState: { ...s.cState, exportedPath: outPath } }));
+          if (outPath) task('成片导出完成 ✓', 100);
+          else task('成片导出完成（预览见各片段）', 100);
+          window.setTimeout(() => task('空闲', 0), 2000);
+        });
+      } else if (m.status === 'failed') {
+        task('导出失败：' + (m.message || ''), 100);
+      }
+    }).catch((e) => task('导出失败：' + String(e), 100));
+  };
+
+  /** 下载创作字幕 SRT：按 shots 台词 + 时长累计时间轴生成（与成片分段对齐）。 */
+  const downloadCreationSrt = (projectId: string) => {
+    const shots = get().cState.story;
+    if (shots.length === 0) { task('分镜为空', 100); return; }
+    const fmt = (sec: number) => {
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const s = Math.floor(sec % 60);
+      const ms = Math.floor((sec - Math.floor(sec)) * 1000);
+      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
+    };
+    let cur = 0;
+    const blocks: string[] = [];
+    shots.forEach((sh, i) => {
+      const dur = Number(sh.dur) || 4;
+      const text = (sh.dialogue || '').trim();
+      if (!text) { cur += dur; return; }
+      const start = cur;
+      const end = cur + dur;
+      blocks.push(`${i + 1}\n${fmt(start)} --> ${fmt(end)}\n${text}\n`);
+      cur = end;
+    });
+    const blob = new Blob([blocks.join('\n')], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${projectId}-字幕.srt`;
+    a.click();
+    URL.revokeObjectURL(url);
+    task('字幕 SRT 已下载 ✓', 100);
+  };
 
   // ---------- 设置 ----------
   const testProvider = (k: string) => set((s) => ({
@@ -965,7 +1070,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
     genScript, goHuman, doHuman, goStory, genStory, editStory, persistStory,
     pickHumanPrompt, pickStyleRef,
     goImage, genImg, addRef, setRefCat, setRefCatItem, delRef, goFrames, genFrames,
-    goVoice, toggleVoice, setVoiceIP, genVoice, goExport, exportCreationJianYing,
+    goVoice, genVoice, setCreationVoice, setCreationTail, clearCreationTail, goExport, exportCreation, downloadCreationSrt,
     testProvider, savePrompt, saveSettings, resetSettings, updOther,
     hydrateProviders, setProviderTest,
   };

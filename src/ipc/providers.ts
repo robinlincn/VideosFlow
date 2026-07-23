@@ -499,6 +499,72 @@ export async function submitImageGen(
 }
 
 // ===========================================================================
+// M5：创作模块收尾（首尾帧视频 / 配音 / 导出）
+// ===========================================================================
+
+/** 读取创作工程 M5 产物清单（clips / audios / tails / exported），供前端展示生成结果。失败时回退空清单。 */
+export async function getCreationManifest(projectId: string): Promise<{
+  clips: Record<string, string>;
+  audios: Record<string, string>;
+  tails: Record<string, string>;
+  exported: string | null;
+}> {
+  try {
+    return await invoke('creation_manifest_get', { projectId });
+  } catch {
+    return { clips: {}, audios: {}, tails: {}, exported: null };
+  }
+}
+
+/** 生成首尾帧视频：逐镜由首帧图生成运镜片段（可选尾帧 crossfade）。tails 为 { shotIndex: absPath }。★ Channel 引用防 GC */
+export async function submitCreationFrames(
+  projectId: string,
+  tails: Record<number, string>,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  const taskId = await invoke<string>('submit_creation_frames', {
+    projectId,
+    tails: JSON.stringify(tails || {}),
+    onProgress: ch,
+  });
+  holdTaskChannel(taskId, ch);
+  return taskId;
+}
+
+/** 多声音配音：逐镜台词走 TTS 生成 wav。voice 为音色名（如 mimo_default）。★ Channel 引用防 GC */
+export async function submitCreationVoice(
+  projectId: string,
+  voice: string,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  const taskId = await invoke<string>('submit_creation_voice', {
+    projectId,
+    voice,
+    onProgress: ch,
+  });
+  holdTaskChannel(taskId, ch);
+  return taskId;
+}
+
+/** 导出成片：拼接镜头片段 + 混入配音 + 烧录字幕 → 最终 MP4。subtitleStyle 为字幕样式键。★ Channel 引用防 GC */
+export async function submitCreationExport(
+  projectId: string,
+  subtitleStyle: string,
+  onProgress: (m: ProgressMsg) => void,
+): Promise<string> {
+  const ch = createChannel(onProgress);
+  const taskId = await invoke<string>('submit_creation_export', {
+    projectId,
+    subtitleStyle,
+    onProgress: ch,
+  });
+  holdTaskChannel(taskId, ch);
+  return taskId;
+}
+
+// ===========================================================================
 // M2.5：影片解说生成
 // ===========================================================================
 
@@ -525,6 +591,8 @@ export async function submitFilmScriptGen(
     subtitleStyle: opts.subtitleStyle ?? '',
     analysis: opts.analysis ?? '',
     rolePrompt: opts.rolePrompt ?? '',
+    rangeStart: opts.rangeStart ?? 0,
+    rangeEnd: opts.rangeEnd ?? 0,
     onProgress: ch,
   });
 }
@@ -745,6 +813,8 @@ export async function filmRenderPreview(
     mixVoice: opts.mixVoice,
     subtitleStyle: opts.subtitleStyle,
     outDir: (opts.outDir as any) || null,
+    rangeStart: opts.rangeStart ?? 0,
+    rangeEnd: opts.rangeEnd ?? 0,
     onProgress: ch,
   });
   holdTaskChannel(taskId, ch);
@@ -765,6 +835,8 @@ export async function filmExportFinal(
     mixVoice: opts.mixVoice,
     subtitleStyle: opts.subtitleStyle,
     outDir: (opts.outDir as any) || null,
+    rangeStart: opts.rangeStart ?? 0,
+    rangeEnd: opts.rangeEnd ?? 0,
     onProgress: ch,
   });
   holdTaskChannel(taskId, ch);

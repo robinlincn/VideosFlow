@@ -12,6 +12,7 @@ import type {
   CreationProject,
   Storyboard,
   GeneratedAsset,
+  CreationManifest,
 } from '../ipc/types';
 
 export type ModuleKey = 'film' | 'spoken' | 'creation' | 'settings';
@@ -125,6 +126,12 @@ export interface CreationState {
   humanPrompt: string;
   styleRef: string;
   refCat: Record<number, string>;
+  /** M5：每镜可选尾帧图绝对路径（上传后传给首尾帧视频任务做 crossfade） */
+  tails: Record<number, string>;
+  /** M5：当前选用音色（如 mimo_default），配音步统一使用 */
+  voiceName: string;
+  /** M5：最终导出成片绝对路径（导出步完成后的预览/下载源） */
+  exportedPath: string;
 }
 
 export interface ProviderCfg {
@@ -316,6 +323,7 @@ export const initialCreation: CreationState = {
   script: '', human: '', story: [],
   imgs: {}, frames: {}, voice: { ok: false }, subs: [],
   refs: {}, voices: [], humanPrompt: 'humanize', styleRef: '现实', refCat: {},
+  tails: {}, voiceName: 'mimo_default', exportedPath: '',
 };
 
 export function defaultSubs() {
@@ -355,6 +363,8 @@ export interface AppState {
   creationSel: string | null;
   creationSb: Storyboard | null;
   creationAssets: GeneratedAsset[];
+  /** M5：创作产物清单（clips / audios / tails / exported），frames/voice/export 步展示与预览用 */
+  creationManifest: CreationManifest | null;
   settingsSub: string;
   settingsState: SettingsState;
 }

@@ -224,6 +224,8 @@ export interface FilmScriptGenOptions {
   subtitleStyle?: string; // 字幕样式
   analysis?: string;    // M2.6：影片视频分析结果（markdown），与所选参数共同驱动解说文案生成
   rolePrompt?: string;  // 设置中「角色设定」提示词模板内容，作为解说生成的角色身份/口吻基准
+  rangeStart?: number;  // 确认范围起点（秒），解说时间点相对此值
+  rangeEnd?: number;    // 确认范围终点（秒）
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +275,19 @@ export interface GeneratedAsset {
   createdAt: number;
 }
 
+/** M5：创作产物清单（clips / audios / tails / exported），存于 data_dir/creation_manifest/<projectId>.json。
+ *  后端 run_creation_frames/voice/export 三段任务逐步写入；前端据此展示生成结果。 */
+export interface CreationManifest {
+  /** 逐镜视频片段路径（frames 步产出）：{ "<shotIndex>": "<abs path>" } */
+  clips: Record<string, string>;
+  /** 逐镜配音 wav 路径（voice 步产出）：{ "<shotIndex>": "<abs path>" } */
+  audios: Record<string, string>;
+  /** 逐镜尾帧图路径（frames 步可选上传）：{ "<shotIndex>": "<abs path>" } */
+  tails: Record<string, string>;
+  /** 最终导出成片路径（export 步产出），未导出为 null */
+  exported: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // 分镜工作台（M2.5+）
 // ---------------------------------------------------------------------------
@@ -317,6 +332,8 @@ export interface FilmCompositeOptions {
   subtitleStyle: string;
   /** 指定导出文件夹（绝对路径）；不传则回退默认 data_dir 位置。 */
   outDir?: string;
+  rangeStart?: number;  // 确认范围起点（秒），用于把相对时间偏移回全片绝对时间
+  rangeEnd?: number;
 }
 
 /** 导出 SRT 参数：字幕文本 + 目标文件夹。 */

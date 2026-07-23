@@ -937,6 +937,78 @@ pub async fn submit_image_gen(
     Ok(id)
 }
 
+/// 读取创作工程 M5 产物清单（clips / audios / tails / exported），供前端展示生成结果。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn creation_manifest_get(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<tasks::CreationManifest, String> {
+    Ok(tasks::read_creation_manifest(&state.data_dir, &project_id))
+}
+
+/// 提交「首尾帧视频」生成任务：逐镜由首帧图生成运镜片段（可选尾帧 crossfade）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn submit_creation_frames(
+    state: State<'_, AppState>,
+    project_id: String,
+    tails: String,
+    on_progress: Channel<ProgressMsg>,
+) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    db::task_create(&state.pool, &id, "creation_frames", Some(&project_id)).await?;
+    let job = TaskJob {
+        id: id.clone(),
+        kind: "creation_frames".into(),
+        project_id: Some(project_id.clone()),
+        payload: serde_json::json!({ "projectId": project_id, "tails": tails }),
+        channel: on_progress,
+    };
+    state.task_tx.send(job).await.map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+/// 提交「配音」任务：逐镜台词走 TTS 生成 wav 配音。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn submit_creation_voice(
+    state: State<'_, AppState>,
+    project_id: String,
+    voice: String,
+    on_progress: Channel<ProgressMsg>,
+) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    db::task_create(&state.pool, &id, "creation_voice", Some(&project_id)).await?;
+    let job = TaskJob {
+        id: id.clone(),
+        kind: "creation_voice".into(),
+        project_id: Some(project_id.clone()),
+        payload: serde_json::json!({ "projectId": project_id, "voice": voice }),
+        channel: on_progress,
+    };
+    state.task_tx.send(job).await.map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+/// 提交「导出成片」任务：拼接镜头片段 + 混入配音 + 烧录字幕 → 最终 MP4。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn submit_creation_export(
+    state: State<'_, AppState>,
+    project_id: String,
+    subtitle_style: String,
+    on_progress: Channel<ProgressMsg>,
+) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    db::task_create(&state.pool, &id, "creation_export", Some(&project_id)).await?;
+    let job = TaskJob {
+        id: id.clone(),
+        kind: "creation_export".into(),
+        project_id: Some(project_id.clone()),
+        payload: serde_json::json!({ "projectId": project_id, "subtitleStyle": subtitle_style }),
+        channel: on_progress,
+    };
+    state.task_tx.send(job).await.map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub async fn submit_film_script_gen(
     state: State<'_, AppState>,

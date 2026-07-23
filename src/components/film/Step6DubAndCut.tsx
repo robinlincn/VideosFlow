@@ -31,6 +31,7 @@ interface Props {
   onBack: () => void;
   onSwitchToNarration: () => void;
   onScriptChange?: (script: string) => void;
+  videoPath: string;
 }
 
 interface Segment {
@@ -128,7 +129,7 @@ const TOOLBAR = [
 ];
 
 export default function Step6DubAndCut({
-  script, videoName, projectId, totalDuration, rangeStart, rangeEnd, onBack, onSwitchToNarration, onScriptChange,
+  script, videoName, projectId, totalDuration, rangeStart, rangeEnd, onBack, onSwitchToNarration, onScriptChange, videoPath,
 }: Props) {
   const { actions } = useApp();
   const [segs, setSegs] = useState<Segment[]>(() => parseScript(script, totalDuration, rangeStart));
@@ -168,13 +169,14 @@ export default function Step6DubAndCut({
   }, [projectId]);
 
   // 源视频预览源：桌面版经本地 fileserver 加载（异步获取 base 后计算）
+  // 依赖 videoPath：重新上传新视频后预览立即刷新（修复旧的 [] 空依赖导致一直显示旧视频）
   useEffect(() => {
     let cancelled = false;
     initVideoServer().then(() => {
-      if (!cancelled) setVideoSrc(toVideoSrc((window as any).__vf_videoPath || ''));
+      if (!cancelled) setVideoSrc(toVideoSrc(videoPath));
     });
     return () => { cancelled = true; };
-  }, []);
+  }, [videoPath]);
 
   // 写入快照（最多 8 条 + 持久化 localStorage）
   const saveSnapshot = (note: string) => {
@@ -275,7 +277,8 @@ export default function Step6DubAndCut({
     const outDir = await pickFolder();
     if (!outDir) { actions.task('已取消导出（未选择文件夹）', 100); return; }
     setExportBusy(true); setExportMsg('导出 SRT');
-    const srt = segs.map((s, i) => `${i + 1}\n${fmt(s.start)} --> ${fmt(s.end)}\n${s.text}\n`).join('\n');
+    // 字幕时间点相对「确认范围」起点，SRT 需偏移回全片绝对时间，否则与成片/画面错位
+    const srt = segs.map((s, i) => `${i + 1}\n${fmt(s.start + rangeStart)} --> ${fmt(s.end + rangeStart)}\n${s.text}\n`).join('\n');
     filmExportSrt(projectId || 'local', { content: srt, outDir }, (m: ProgressMsg) => {
       setExportMsg(m.message || '');
       if (m.status === 'done') {
@@ -303,7 +306,7 @@ export default function Step6DubAndCut({
       // 真实剪映草稿导出：写入 data_dir/jianying_drafts/<project>_<ts>/draft_content.json 等
       await exportJianyingDraft(projectId || 'local', {
         script: segsToScript(segs),
-        videoPath: (window as any).__vf_videoPath || '',
+        videoPath: videoPath,
         rangeStart,
         rangeEnd,
         outDir,
@@ -338,7 +341,7 @@ export default function Step6DubAndCut({
     setExportBusy(true); setExportMsg('导出 Premiere');
     exportPremiere(projectId, {
       script: segsToScript(segs),
-      videoPath: (window as any).__vf_videoPath || '',
+      videoPath: videoPath,
       rangeStart, rangeEnd,
       followOriginal, flowerText, strictAlign, outDir,
     }, (m: ProgressMsg) => {
@@ -367,7 +370,7 @@ export default function Step6DubAndCut({
     setExportBusy(true); setExportMsg('导出国际剪映');
     exportJianyingDraftIntl(projectId, {
       script: segsToScript(segs),
-      videoPath: (window as any).__vf_videoPath || '',
+      videoPath: videoPath,
       rangeStart, rangeEnd,
       followOriginal, flowerText, strictAlign, outDir,
     }, (m: ProgressMsg) => {
@@ -396,10 +399,12 @@ export default function Step6DubAndCut({
     setExportBusy(true); setExportMsg('合成预览成片中');
     filmRenderPreview(projectId, {
       script: segsToScript(segs),
-      videoPath: (window as any).__vf_videoPath || '',
+      videoPath: videoPath,
       mixVoice: true,
       subtitleStyle,
       outDir,
+      rangeStart,
+      rangeEnd,
     }, (m: ProgressMsg) => {
       setExportMsg(m.message || '');
       if (m.status === 'done') {
@@ -427,10 +432,12 @@ export default function Step6DubAndCut({
     setExportBusy(true); setExportMsg('导出成片中');
     filmExportFinal(projectId, {
       script: segsToScript(segs),
-      videoPath: (window as any).__vf_videoPath || '',
+      videoPath: videoPath,
       mixVoice: true,
       subtitleStyle,
       outDir,
+      rangeStart,
+      rangeEnd,
     }, (m: ProgressMsg) => {
       setExportMsg(m.message || '');
       if (m.status === 'done') {
@@ -749,7 +756,7 @@ export default function Step6DubAndCut({
         const outDir = await pickFolder();
         if (!outDir) { actions.task('已取消导出（未选择文件夹）', 100); break; }
         setExportBusy(true); setExportMsg('导出剪映草稿中');
-        exportJianyingDraft(projectId, { script: segsToScript(segs), videoPath: (window as any).__vf_videoPath || '', rangeStart, rangeEnd, outDir }, (m: ProgressMsg) => {
+        exportJianyingDraft(projectId, { script: segsToScript(segs), videoPath: videoPath, rangeStart, rangeEnd, outDir }, (m: ProgressMsg) => {
           setExportMsg(m.message || '');
           if (m.status === 'done') {
             setExportBusy(false);

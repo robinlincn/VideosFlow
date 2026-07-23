@@ -163,6 +163,8 @@ export default function Step5Narration({
         subtitleStyle,
         analysis: report,
         rolePrompt,
+        rangeStart,
+        rangeEnd,
       };
       setTaskPct(0);
       setTaskMsg('生成解说文案');
