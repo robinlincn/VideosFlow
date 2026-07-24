@@ -278,12 +278,18 @@ impl FfMpeg {
 
     /// 合成单个分镜成片片段：视频（来自 frames 片段）+ 可选配音（wav）+ 烧录该镜台词字幕（drawtext）。
     /// 统一 1920x1080 / 30fps / yuv420p，方便最终 concat copy 拼接。sub_text_file 为台词 UTF-8 文本。
-    pub fn compose_seg_cmd(&self, video: &str, audio: Option<&str>, sub_text_file: &str, output: &str) -> Command {
+    pub fn compose_seg_cmd(&self, video: &str, audio: Option<&str>, sub_text_file: &str, output: &str, sub_style: &str) -> Command {
         let font = "C\\:/Windows/Fonts/msyh.ttc";
         let sub = sub_text_file.replace('\\', "/").replace(":", "\\:");
+        // 字幕样式：standard 白字黑边 / highlight 黄字深底强调 / big 大字白边
+        let (color, boxcolor, fontsize, y) = match sub_style {
+            "highlight" => ("yellow", "black@0.7", 48, "h-text_h-30"),
+            "big" => ("white", "black@0.5", 64, "h-text_h-40"),
+            _ => ("white", "black@0.5", 48, "h-text_h-30"),
+        };
         let filter = format!(
-            "scale=1920:1080,drawtext=fontfile='{}':textfile='{}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=h-text_h-30",
-            font, sub
+            "scale=1920:1080,drawtext=fontfile='{}':textfile='{}':fontcolor={}:fontsize={}:box=1:boxcolor={}:boxborderw=10:x=(w-text_w)/2:y={}",
+            font, sub, color, fontsize, boxcolor, y
         );
         let mut c = Command::new(&self.path);
         c.args(["-i", video]);

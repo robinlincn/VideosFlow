@@ -9,6 +9,8 @@ import Film from './modules/Film';
 import Spoken from './modules/Spoken';
 import Creation from './modules/Creation';
 import Settings from './modules/Settings';
+import GenProgress from './components/GenProgress';
+import ErrorBoundary from './components/ErrorBoundary';
 import { ModuleKey } from './data/mock';
 
 const MODULES = [
@@ -54,9 +56,48 @@ const VIEW_HEADER: Record<ModuleKey, { eyebrow: string; title: string; em: strin
 
 function Inspector() {
   const { state, actions } = useApp();
+  const task = state.task;
+  const taskNav = state.taskNav;
+  const idle = task.label === '空闲' || task.p <= 0;
+  const failed = /失败|错误|error/i.test(task.label);
+  const done = !idle && !failed && task.p >= 100;
+  const goTask = () => {
+    if (!taskNav) return;
+    const patch: any = { module: taskNav.module };
+    if (taskNav.module === 'creation') {
+      patch.cStage = taskNav.stage ?? state.cStage;
+      if (taskNav.sel) patch.creationSel = taskNav.sel;
+    } else if (taskNav.module === 'film') {
+      patch.filmStage = 'editor';
+      if (taskNav.stage) patch.editorSub = taskNav.stage;
+      if (taskNav.sel) patch.editingProj = { cat: state.editingProj?.cat ?? 'c1', id: taskNav.sel, t: state.editingProj?.t ?? '' };
+    } else if (taskNav.module === 'spoken') {
+      if (taskNav.stage) patch.spokenStage = taskNav.stage;
+      if (taskNav.sel) patch.spokenSel = taskNav.sel;
+    }
+    actions.set(patch);
+  };
+  const taskCard = (
+    <>
+      <div className="insp-title">任务进度</div>
+      <div className={'insp-card task-prog ' + (idle ? 'idle' : done ? 'done' : failed ? 'fail' : 'run')}>
+        <div className="task-prog__row">
+          <span className="task-prog__label">{task.label}</span>
+          {taskNav && !idle && <button className="task-prog__go" onClick={goTask}>查看 →</button>}
+        </div>
+        {!idle && (
+          <div className="task-prog__bar"><i style={{ width: Math.min(100, Math.max(0, task.p)) + '%' }} /></div>
+        )}
+        <div className="task-prog__meta">
+          {idle ? '当前无进行中的任务' : (done ? '已完成' : failed ? '失败' : `${Math.round(task.p)}%`)}
+        </div>
+      </div>
+    </>
+  );
   if (state.module === 'film' && state.filmStage === 'editor') {
     return (
       <>
+        {taskCard}
         <div className="insp-title">剪辑台进度</div>
         <div className="insp-card">
           <div className="ol">
@@ -96,6 +137,7 @@ function Inspector() {
     const total = Object.keys(p).length;
     return (
       <>
+        {taskCard}
         <div className="insp-title">配置概览</div>
         <div className="insp-card">已启用模型 <strong>{enabled}</strong> / {total}</div>
         <div className="insp-card">提示词模板 <strong>{Object.keys(state.settingsState.prompts).length}</strong> 个</div>
@@ -109,6 +151,7 @@ function Inspector() {
   }
   return (
     <>
+      {taskCard}
       <div className="insp-title">提示</div>
       <div className="insp-card muted sm">在左侧选择工作区。影片用于成片剪辑，口播用于净化，创作视频用于从需求生成完整视频。</div>
     </>
@@ -235,10 +278,12 @@ export default function App() {
         <div className="content">
           <div className="content-inner">
             <ViewHeader module={state.module} />
-            {state.module === 'film' && <Film />}
-            {state.module === 'spoken' && <Spoken />}
-            {state.module === 'creation' && <Creation />}
-            {state.module === 'settings' && <Settings />}
+            <ErrorBoundary>
+              {state.module === 'film' && <Film />}
+              {state.module === 'spoken' && <Spoken />}
+              {state.module === 'creation' && <Creation />}
+              {state.module === 'settings' && <Settings />}
+            </ErrorBoundary>
           </div>
         </div>
       </main>
@@ -253,6 +298,9 @@ export default function App() {
         <span>STATUS · {state.task.label}</span>
         <span className="prog"><i style={{ width: state.task.p + '%' }} /></span>
       </div>
+
+      {/* 生成进度弹窗（覆盖所有模块的生成任务） */}
+      <GenProgress />
 
       {/* Mobile bottom navigation */}
       <nav className="mobile-nav">

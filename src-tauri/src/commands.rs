@@ -213,10 +213,11 @@ pub async fn provider_test(
     let client = &state.client;
     let has_key = key.is_some();
 
-    // 真实功能测试：ASR / TTS 直连真实端点，验证 Key 对该能力确实有效
+    // 真实功能测试：ASR / TTS / IMG 直连真实端点，验证 Key 对该能力确实有效
     match kind.as_str() {
         "asr" => return test_asr(client, &base, &row.model, key.as_deref()).await,
         "tts" => return test_tts(client, &base, &row.model, key.as_deref()).await,
+        "img" => return test_image(client, &base, &row.model, key.as_deref()).await,
         _ => {}
     }
 
@@ -360,6 +361,40 @@ async fn test_tts(client: &Client, base: &str, model: &str, key: Option<&str>) -
         return Err("TTS 返回中缺少 audio.data，请确认模型/密钥是否支持 TTS".into());
     }
     Ok("ok".into())
+}
+
+/// 图片生成功能测试：用极小参数真实请求一次 /images/generations，验证该端点确实可用。
+/// 与「仅探测根地址」的旧逻辑不同，这里真正打到图片端点，避免「已连接」误报。
+async fn test_image(client: &Client, base: &str, model: &str, key: Option<&str>) -> Result<String, String> {
+    let key = key.ok_or("缺少 API Key，请先填写 Key 再测试图片生成")?;
+    let body = serde_json::json!({
+        "model": model,
+        "prompt": "a tiny red dot on a white background, minimal",
+        "size": "256x256",
+        "n": 1,
+    });
+    match client
+        .post(format!("{}/images/generations", base.trim_end_matches('/')))
+        .bearer_auth(key)
+        .json(&body)
+        .timeout(Duration::from_secs(60))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            if resp.status().is_success() {
+                Ok("ok".into())
+            } else if code == 401 || code == 403 {
+                Err("图片 API Key 无效或未授权（HTTP 401/403），请检查密钥".into())
+            } else {
+                let text = resp.text().await.unwrap_or_default();
+                let clip: String = text.chars().take(300).collect();
+                Err(format!("图片端点返回 HTTP {code}：{clip}"))
+            }
+        }
+        Err(e) => Err(format!("图片端点连接失败：{e}（可能网关不支持该路径、模型名不符或网络被拦截）")),
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]

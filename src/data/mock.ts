@@ -17,6 +17,13 @@ import type {
 
 export type ModuleKey = 'film' | 'spoken' | 'creation' | 'settings';
 
+/** 生成任务完成后的跳转目标：module 决定模块，stage 决定子步骤（cStage / editorSub / spokenStage），sel 决定选中的工程。 */
+export interface TaskNav {
+  module: ModuleKey;
+  stage?: string;
+  sel?: string;
+}
+
 export interface FilmCat extends FilmCategory {}
 
 export interface FilmProjectRow extends FilmProject {}
@@ -199,7 +206,6 @@ export const spokenSteps = [
 export const cSteps = [
   { id: 'req', name: '需求' },
   { id: 'script', name: '文案' },
-  { id: 'human', name: '去AI味' },
   { id: 'story', name: '分镜' },
   { id: 'image', name: '图片' },
   { id: 'frames', name: '首尾帧视频' },
@@ -338,6 +344,8 @@ export function defaultSubs() {
 export interface AppState {
   module: ModuleKey;
   task: { label: string; p: number };
+  /** 生成任务完成后的跳转目标（toast / 浮窗点击后跳到对应页面）。无则不跳转。 */
+  taskNav: TaskNav | null;
   filmCat: string;
   filmStage: 'library' | 'editor';
   editorSub: string;

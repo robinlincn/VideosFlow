@@ -1819,14 +1819,18 @@ pub async fn run_llm_json(
     let body = serde_json::json!({
         "model": model,
         "messages": [{ "role": "user", "content": prompt }],
-        "max_tokens": 1024,
-        "temperature": 0.2,
+        // 与 run_llm_text 保持一致：输出 token 上限提到 8192。
+        // 注意：推理类模型会把 reasoning 计入 max_tokens 总预算，1024 太小会导致
+        // reasoning 吃满预算后 content 返回空字符串，进而触发「EOF while parsing」空内容解析错误。
+        // 提至 8192 给足余量，分镜 JSON 4~6 镜头也远用不完。
+        "max_tokens": 8192,
+        "temperature": 0.3,
     });
     let resp = client
         .post(&url)
         .bearer_auth(api_key)
         .json(&body)
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(180))
         .send()
         .await
         .map_err(|e| format!("大模型调用失败: {e}"))?;
@@ -1835,14 +1839,22 @@ pub async fn run_llm_json(
         let txt = resp.text().await.unwrap_or_default();
         return Err(format!("大模型返回 {st}: {txt}"));
     }
-    let v: serde_json::Value = resp.json().await.map_err(|e| format!("解析大模型响应失败: {e}"))?;
-    let text = v
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let msg = v
         .get("choices")
         .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
+        .and_then(|c| c.get("message"));
+    let text = msg
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
-        .ok_or_else(|| "大模型响应缺 choices[0].message.content".to_string())?;
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        // content 为空：dump 原始响应便于诊断（推理模型预算耗尽 / 字段错位等）
+        let dump = serde_json::to_string(&v).unwrap_or_default();
+        return Err(format!("大模型返回的 content 为空（原文: {}）", dump.chars().take(400).collect::<String>()));
+    }
     // 从文本里抠 JSON（兼容模型在内容里包 ```json``` 或前后多余文字）
     let s = text.trim();
     let json_str = if let Some(stripped) = s.strip_prefix("```json") {
@@ -2392,6 +2404,56 @@ pub async fn llm_provider(pool: &SqlitePool) -> Result<(String, String, String),
     Ok((row.base_url, row.model, key))
 }
 
+/// 清理大模型返回的「创作性文案」：去 ``` 代码围栏、去首行说明性前导废话、去首尾空白，只留正文。
+fn clean_script(s: &str) -> String {
+    let mut t = s.trim().to_string();
+    // 去 ``` 围栏
+    if t.starts_with("```") {
+        if let Some(stripped) = t.strip_prefix("```json").or_else(|| t.strip_prefix("```")) {
+            t = stripped.trim().to_string();
+        }
+        if let Some(end) = t.rfind("```") {
+            t = t[..end].trim().to_string();
+        }
+    }
+    // 去掉首行「说明性前导」（模型常会加「根据您的需求…」「以下是…」之类）
+    let first = t.lines().next().unwrap_or("").trim().to_string();
+    let meta: [&str; 10] = [
+        "根据您", "根据需求", "以下是", "为您", "好的，", "好的!", "【需求", "【文案", "注：", "说明：",
+    ];
+    if meta.iter().any(|m| first.starts_with(m)) {
+        t = t.lines().skip(1).collect::<Vec<_>>().join("\n").trim().to_string();
+    }
+    t.trim().to_string()
+}
+
+/// 把 LLM 返回的分镜对象规整为前端需要的 canonical 字段（兼容中英文 key，dur 强制为数字）。
+fn canon_shot(s: &serde_json::Value, idx: usize) -> serde_json::Value {
+    let o = s.as_object().cloned().unwrap_or_default();
+    let pick = |en: &str, zh: &[&str]| -> serde_json::Value {
+        if let Some(v) = o.get(en) { return v.clone(); }
+        for z in zh { if let Some(v) = o.get(*z) { return v.clone(); } }
+        serde_json::Value::Null
+    };
+    let desc = pick("desc", &["画面描述", "画面", "场景", "scene"]);
+    let dialogue = pick("dialogue", &["台词", "旁白", "narration", "line"]);
+    let dur_raw = pick("dur", &["时长秒", "时长", "duration"]);
+    let dur = dur_raw.as_f64()
+        .or_else(|| dur_raw.as_str().and_then(|x| {
+            let digits: String = x.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
+            digits.parse::<f64>().ok()
+        }))
+        .unwrap_or(5.0);
+    let cam = pick("cam", &["运镜", "运镜建议", "camera"]);
+    serde_json::json!({
+        "index": idx,
+        "desc": desc.as_str().map(|x| x.trim().to_string()).unwrap_or_default(),
+        "dialogue": dialogue.as_str().map(|x| x.trim().to_string()).unwrap_or_default(),
+        "dur": dur as u32,
+        "cam": cam.as_str().map(|x| x.trim().to_string()).unwrap_or_default(),
+    })
+}
+
 /// 自动写文案：LLM 调用 + settings.prompts.script 模板 + 写 creation_projects.script
 async fn run_script_write(
     pool: &SqlitePool,
@@ -2414,19 +2476,20 @@ async fn run_script_write(
     });
     let (base_url, model, key) = llm_provider(pool).await?;
     let prompt = format!(
-        "请你担任资深短视频文案，根据以下需求撰写一份适合配音的画面感文案，长度约 60-80 字，语气自然：\n\n需求：{}\n风格：{}\n受众：{}",
-        brief, "轻松活泼", "新手"
+        "你是一名资深短视频编导。下面是我给定的【创作需求 / 工程标题】，请严格以此为核心创作一份可直接配音的口播文案。\n\n\
+硬性要求：\n\
+1. 100% 围绕需求中的主题与具体内容展开，绝不可泛泛而谈，也绝不可偏离主题去讲别的产品、工具或平台。\n\
+2. 先判断需求里是否指定了【时长】（如 30 秒 / 60 秒 / 2 分钟）、【风格】（科普 / 种草 / 教程 / 职场 / 旅行等）、【受众】或【平台】；若指定则严格遵守——时长决定文案总长度（约 4 字 / 秒）。\n\
+3. 必须包含需求中明确提到的关键事物 / 方法 / 步骤的「具体内容」：例如需求点名了某个工具或技术，就要写出它的真实用途、亮点或操作步骤，而不是空话套话。\n\
+4. 口语化、有画面感、有信息量；避免「大家好」「今天给大家分享」之类的套话开头，直接切入主题。\n\
+5. 只输出文案正文，不要标题、不要序号、不要任何解释说明。\n\n\
+【创作需求 / 工程标题】：{}",
+        brief
     );
-    let script = match run_llm_text(client, &base_url, &model, &key, &prompt).await {
-        Ok(s) => s,
-        Err(_) => {
-            // 降级：本地构造一段占位文案
-            format!(
-                "大家好，今天聊一个新手也能上手的事——{}\n\n你只需要给个大体的需求，它就能自动写稿、拆分镜、出图片，还能配音加字幕。\n\n以前剪一条视频要折腾大半天，现在把想法交给它，剩下的交给流程。\n\n如果你也想轻松做视频，不妨试试看。",
-                brief
-            )
-        }
-    };
+    // 注意：LLM 调用失败时如实返回错误，绝不静默降级成与标题无关的占位文案。
+    let raw_script = run_llm_text(client, &base_url, &model, &key, &prompt).await
+        .map_err(|e| format!("文案生成失败（大模型）：{e}"))?;
+    let script = clean_script(&raw_script);
     db::creation_project_update(pool, &project_id, None, Some(&script), None, Some("writing")).await?;
     Ok(script)
 }
@@ -2453,24 +2516,15 @@ async fn run_script_humanize(
     });
     let (base_url, model, key) = llm_provider(pool).await?;
     let prompt = format!(
-        "请你把以下文案改写成自然口语，去掉 AI 套话与空泛表达，加具体细节、停顿感与生活化比喻，保持原意：\n\n{}",
+        "请你把以下文案改写成自然口语，去掉 AI 套话与空泛表达，加具体细节、停顿感与生活化比喻，保持原意与主题不变：\n\n{}",
         script
     );
-    let human = match run_llm_text(client, &base_url, &model, &key, &prompt).await {
-        Ok(s) => s,
-        Err(_) => {
-            format!(
-                "嗨，今天说个特适合新手的事儿——{}\n\n你大概说个想法就行，它自己写稿、拆镜头、出图，连配音字幕都帮你弄好。\n\n以前剪一条视频得忙活大半天，现在你把点子丢给它，流程自动跑完。\n\n想轻松做视频的话，真的可以试一下。",
-                brief_excerpt(&script)
-            )
-        }
-    };
+    // 注意：LLM 调用失败时如实返回错误，绝不静默降级成与主题无关的占位文案。
+    let raw_human = run_llm_text(client, &base_url, &model, &key, &prompt).await
+        .map_err(|e| format!("去 AI 味失败（大模型）：{e}"))?;
+    let human = clean_script(&raw_human);
     db::creation_project_update(pool, &project_id, None, None, Some(&human), Some("humanized")).await?;
     Ok(human)
-}
-
-fn brief_excerpt(s: &str) -> String {
-    s.chars().take(40).collect()
 }
 
 /// 生成分镜：LLM 返回 JSON 数组 → 解析 → 写 storyboards
@@ -2495,22 +2549,22 @@ async fn run_storyboard_gen(
     });
     let (base_url, model, key) = llm_provider(pool).await?;
     let prompt = format!(
-        "请将以下文案拆为 4-6 个镜头，每个镜头给出：画面描述、台词、时长秒、运镜建议，JSON 数组返回：\n\n{}",
+        "请将以下文案拆为 4-6 个镜头，严格按如下 JSON 数组返回，每个对象字段固定为：\
+\"desc\"（画面描述，字符串）、\"dialogue\"（台词，字符串）、\"dur\"（时长秒，纯数字如 5）、\"cam\"（运镜建议，字符串）。\
+只返回 JSON 数组本身，不要任何解释、不要代码围栏：\n\n{}",
         human
     );
     // 默认风格约束卡：现实（也允许前端后续覆盖）
     let style_ref = "现实";
     let shots_json = match run_llm_json(client, &base_url, &model, &key, &prompt).await {
-        Ok(arr) => serde_json::to_string(&arr).unwrap_or_else(|_| "[]".into()),
-        Err(_) => {
-            // 降级：本地构造 4 个分镜
-            serde_json::to_string(&vec![
-                serde_json::json!({"index":0,"desc":"开场：主持人近景微笑，背景虚化","dialogue":"嗨，今天说个特适合新手的事儿。","dur":5,"cam":"近景"}),
-                serde_json::json!({"index":1,"desc":"界面展示：AI 剪辑按钮高亮","dialogue":"你大概说个想法就行。","dur":6,"cam":"推近"}),
-                serde_json::json!({"index":2,"desc":"动画：文案自动变成时间线","dialogue":"连配音字幕都帮你弄好。","dur":6,"cam":"平摇"}),
-                serde_json::json!({"index":3,"desc":"结尾：主持人比赞，品牌浮现","dialogue":"想轻松做视频，真的可以试一下。","dur":4,"cam":"中景"}),
-            ]).unwrap_or_else(|_| "[]".into())
+        Ok(arr) => {
+            // 规范：为每个分镜规整为 canonical 字段（兼容中英文 key，dur 强制数字）
+            let list: Vec<serde_json::Value> = arr.as_array().cloned().unwrap_or_default();
+            let norm: Vec<serde_json::Value> = list.iter().enumerate().map(|(i, s)| canon_shot(s, i)).collect();
+            serde_json::to_string(&norm).unwrap_or_else(|_| "[]".into())
         }
+        // 注意：LLM 调用失败时如实返回错误，绝不静默降级成与主题无关的占位分镜。
+        Err(e) => return Err(format!("分镜生成失败（大模型）：{e}")),
     };
     db::storyboard_save(pool, &project_id, &shots_json, style_ref).await?;
     db::creation_project_update(pool, &project_id, None, None, None, Some("storyboard")).await?;
@@ -2533,6 +2587,7 @@ async fn run_image_gen_task(
         .ok_or_else(|| "请先生成分镜".to_string())?;
     let shots: Vec<serde_json::Value> = serde_json::from_str(&sb.shots).map_err(|e| e.to_string())?;
     let shot = shots.iter().find(|s| s.get("index").and_then(|x| x.as_i64()) == Some(shot_index))
+        .or_else(|| shots.get(shot_index as usize))
         .ok_or_else(|| format!("未找到分镜 index={shot_index}"))?;
     let desc = shot.get("desc").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let dialogue = shot.get("dialogue").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -2569,25 +2624,78 @@ async fn run_image_gen_task(
         "n": 1,
         "seed": seed,
     });
-    let resp = client
-        .post(format!("{base_url}/images/generations"))
-        .bearer_auth(key.as_str())
-        .json(&body)
-        .timeout(std::time::Duration::from_secs(120))
-        .send()
-        .await
-        .map_err(|e| format!("Agnes 图片调用失败: {e}"))?;
+    eprintln!("[videosflow] image_gen POST {}/images/generations model={}", base_url, row.model);
+    // 图片生成（尤其 1024x1024）可能较慢，给足超时（300s）；对超时/连接错误做 1 次重试。
+    let max_attempts = 2u32;
+    let mut attempt = 0u32;
+    let resp = loop {
+        attempt += 1;
+        match client
+            .post(format!("{base_url}/images/generations"))
+            .bearer_auth(key.as_str())
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(300))
+            .send()
+            .await
+        {
+            Ok(r) => break r,
+            Err(e) => {
+                let retryable = e.is_timeout() || e.is_connect() || e.is_request();
+                let msg = format!("Agnes 图片调用失败: {e:?}");
+                if attempt < max_attempts && retryable {
+                    let wait = attempt as u64 * 3;
+                    emit(ProgressMsg {
+                        task_id: job.id.clone(),
+                        progress: 35.0,
+                        status: "running".into(),
+                        message: Some(format!("图片接口超时，{wait}s 后第 {attempt} 次重试")),
+                        payload: None,
+                    });
+                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                    continue;
+                }
+                return Err(msg);
+            }
+        }
+    };
     if !resp.status().is_success() {
         let st = resp.status();
         let txt = resp.text().await.unwrap_or_default();
         return Err(format!("Agnes 图片返回 {st}: {txt}"));
     }
     let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    let b64 = v.get("data")
+    // Agnes 兼容 OpenAI 风格响应，可能返回 data[0].b64_json（base64）或 data[0].url（链接）。
+    let bytes = if let Some(b64) = v.get("data")
         .and_then(|d| d.get(0))
         .and_then(|d| d.get("b64_json"))
         .and_then(|b| b.as_str())
-        .ok_or_else(|| "Agnes 响应缺 data[0].b64_json".to_string())?;
+    {
+        base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| format!("base64 解码失败: {e}"))?
+    } else {
+        // 回退：data[0].url —— 下载图片字节写本地
+        let url = v.get("data")
+            .and_then(|d| d.get(0))
+            .and_then(|d| d.get("url"))
+            .and_then(|u| u.as_str())
+            .ok_or_else(|| "Agnes 响应既缺 data[0].b64_json 也缺 data[0].url".to_string())?;
+        emit(ProgressMsg {
+            task_id: job.id.clone(),
+            progress: 55.0,
+            status: "running".into(),
+            message: Some("下载生成的图片".into()),
+            payload: None,
+        });
+        client
+            .get(url)
+            .timeout(std::time::Duration::from_secs(300))
+            .send()
+            .await
+            .map_err(|e| format!("下载图片失败: {e}"))?
+            .bytes()
+            .await
+            .map_err(|e| format!("读取图片字节失败: {e}"))?
+            .to_vec()
+    };
 
     emit(ProgressMsg {
         task_id: job.id.clone(),
@@ -2596,7 +2704,6 @@ async fn run_image_gen_task(
         message: Some("写入本地文件".into()),
         payload: None,
     });
-    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| format!("base64 解码失败: {e}"))?;
     let asset_dir = data_dir.join("creation_assets").join(&project_id);
     std::fs::create_dir_all(&asset_dir).map_err(|e| e.to_string())?;
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -5386,6 +5493,7 @@ async fn run_creation_export(
 
     let manifest = read_creation_manifest(data_dir, &project_id);
     if manifest.clips.is_empty() { return Err("请先在「首尾帧视频」步生成镜头片段".into()); }
+    let sub_style = job.payload.get("subtitle_style").and_then(|v| v.as_str()).unwrap_or("standard");
 
     let ff = FfMpeg::ensure(data_dir).await?;
     let safe = sanitize_filename(&project_id);
@@ -5422,12 +5530,12 @@ async fn run_creation_export(
                 let src_dur = ff.probe_duration(a).unwrap_or(clip_dur);
                 let norm = out_dir.join(format!("seg_{:03}_audio.wav", i));
                 let _ = ff.normalize_audio_to(a, norm.to_str().unwrap(), src_dur, clip_dur).status();
-                ff.compose_seg_cmd(&clip, Some(norm.to_str().unwrap()), txt.to_str().unwrap(), seg_out.to_str().unwrap())
+                ff.compose_seg_cmd(&clip, Some(norm.to_str().unwrap()), txt.to_str().unwrap(), seg_out.to_str().unwrap(), sub_style)
             } else {
-                ff.compose_seg_cmd(&clip, None, txt.to_str().unwrap(), seg_out.to_str().unwrap())
+                ff.compose_seg_cmd(&clip, None, txt.to_str().unwrap(), seg_out.to_str().unwrap(), sub_style)
             }
         } else {
-            ff.compose_seg_cmd(&clip, None, txt.to_str().unwrap(), seg_out.to_str().unwrap())
+            ff.compose_seg_cmd(&clip, None, txt.to_str().unwrap(), seg_out.to_str().unwrap(), sub_style)
         };
         let st = cmd.status().map_err(|e| format!("合成镜头 {} 失败: {e}", idx + 1))?;
         if !st.success() { return Err(format!("合成镜头 {} 失败（ffmpeg 退出码 {st}）", idx + 1)); }

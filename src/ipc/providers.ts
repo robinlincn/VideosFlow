@@ -440,7 +440,17 @@ export async function deleteCreationProject(id: string): Promise<void> {
 }
 
 export async function loadStoryboard(projectId: string): Promise<Storyboard | null> {
-  return invoke<Storyboard | null>('storyboard_get', { projectId });
+  const sb = await invoke<Storyboard | null>('storyboard_get', { projectId });
+  // Rust 把 shots 以 JSON 字符串（TEXT 列）返回；前端必须解析成数组，
+  // 否则 StoryView / useShots / editStory 的 .map 会因拿到字符串而崩溃。
+  if (sb) {
+    const s = sb as any;
+    if (typeof s.shots === 'string') {
+      try { s.shots = JSON.parse(s.shots); } catch { s.shots = []; }
+    }
+    if (!Array.isArray(s.shots)) s.shots = [];
+  }
+  return sb;
 }
 
 export async function saveStoryboard(

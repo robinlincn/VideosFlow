@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useRef, useState, useEffect } from 'react';
 import {
-  AppState, ModuleKey, ProviderCfg,
+  AppState, ModuleKey, ProviderCfg, TaskNav,
 } from '../data/mock';
 import type { ProviderRow, ProgressMsg, FilmCategory, FilmProject, TimelineEnvelope, TimelineClip, CreationManifest } from '../ipc/types';
 import {
@@ -29,6 +29,7 @@ import type { SpokenVideo as SpokenVideoDb, SpokenEdit, SpokenAsset, CreationPro
 const initialState: AppState = {
   module: 'film',
   task: { label: '空闲', p: 0 },
+  taskNav: null,
   filmCat: 'c1', filmStage: 'library', editorSub: 'gen',
   editingProj: null, selectedClip: null,
   filmCats: initialFilmCats, filmProjects: initialFilmProjects, editorState: initialEditorState,
@@ -55,7 +56,7 @@ type SetState = React.Dispatch<React.SetStateAction<AppState>>;
 interface AppCtx {
   state: AppState;
   set: SetState;
-  task: (label: string, p?: number) => void;
+  task: (label: string, p?: number, nav?: TaskNav | null) => void;
   actions: ReturnType<typeof buildActions>;
 }
 
@@ -101,7 +102,7 @@ function flattenClips(env: TimelineEnvelope): TimelineClip[] {
   return out;
 }
 
-function buildActions(set: SetState, task: (l: string, p?: number) => void, get: () => AppState) {
+function buildActions(set: SetState, task: (l: string, p?: number, nav?: TaskNav | null) => void, get: () => AppState) {
   const sim = (label: string, ms: number, fn: () => void) => {
     task(label, 40);
     window.setTimeout(() => {
@@ -291,7 +292,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
       return;
     }
     // M2.5：调真实 Rust 任务（film_script_gen）走 ASR→LLM→六段式
-    task('生成解说文案中…', 10);
+    task('生成解说文案中…', 10, { module: 'film', stage: 'gen', sel: proj.id });
     submitFilmScriptGen(proj.id, {
       videoPath: (proj as any).videoPath || '',
       title: (proj as any).title || (proj as any).t || '未命名视频',
@@ -338,7 +339,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
     const pid = proj.id;
     const videoPath = get().editorState.videoPath;
     const script = get().editorState.script;
-    task('导入并抽取音轨…', 10);
+    task('导入并抽取音轨…', 10, { module: 'film', stage: 'align', sel: proj.id });
     submitFilmImport(pid, videoPath, script, (m: ProgressMsg) => {
       task(m.message || '导入对齐中…', m.progress);
       if (m.status === 'done') {
@@ -379,7 +380,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
   const genVoiceForFilm = () => {
     const script = get().editorState.script;
     const lines = buildVoiceLines(script);
-    task('智能配音 + 生成字幕…', 40);
+    task('智能配音 + 生成字幕…', 40, { module: 'film', stage: 'voice', sel: get().editingProj?.id });
     window.setTimeout(() => {
       set((s) => ({ ...s, editorState: { ...s.editorState, voiceLines: lines, aligned: true } }));
       task('配音生成 ✓', 100);
@@ -399,7 +400,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
     if (!proj) return;
     const pid = proj.id;
     const script = get().editorState.script;
-    task('载入时间线并切点…', 10);
+    task('载入时间线并切点…', 10, { module: 'film', stage: 'cut', sel: proj.id });
     submitFilmSmartCut(pid, script, (m: ProgressMsg) => {
       task(m.message || '自动切点中…', m.progress);
       if (m.status === 'done') {
@@ -452,7 +453,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
     const proj = get().editingProj;
     if (!proj) return;
     const opts = get().editorState.exportOpts;
-    task('准备导出…', 5);
+    task('准备导出…', 5, { module: 'film', stage: 'out', sel: proj.id });
     submitFilmExport(proj.id, { ...opts, script: get().editorState.script }, (m: ProgressMsg) => {
       task(m.message || '导出中…', m.progress);
       if (m.status === 'done') {
@@ -503,7 +504,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
 
   /** 异步识别：抽音轨 → XiaomiMimo ASR → 写 transcript + script */
   const transcribe = async (videoId: string) => {
-    task('识别音频中…', 10);
+    task('识别音频中…', 10, { module: 'spoken', stage: 'tr', sel: videoId });
     submitSpokenAsr(videoId, (m) => {
       task(m.message || '识别中…', m.progress);
       if (m.status === 'done') {
@@ -573,7 +574,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
 
   /** 异步检测：gap/repeat/mistake → 写 spoken_edits */
   const doMatch = async (videoId: string) => {
-    task('检测中…', 10);
+    task('检测中…', 10, { module: 'spoken', stage: 'match', sel: videoId });
     submitSpokenDetect(videoId, (m) => {
       task(m.message || '检测中…', m.progress);
       if (m.status === 'done') {
@@ -605,7 +606,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
 
   /** 关键词抽取（LLM → TF-IDF 降级） */
   const extractKeywords = async (videoId: string) => {
-    task('抽取关键词中…', 10);
+    task('抽取关键词中…', 10, { module: 'spoken', stage: 'match', sel: videoId });
     submitSpokenKeyword(videoId, (m) => {
       task(m.message || '抽取中…', m.progress);
       if (m.status === 'done') {
@@ -631,7 +632,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
 
   /** 异步：FFmpeg 烧录花字 */
   const burnFlower = (videoId: string, flower: string) => {
-    task('烧录花字中…', 10);
+    task('烧录花字中…', 10, { module: 'spoken', stage: 'flw', sel: videoId });
     submitSpokenBurn(videoId, flower, (m) => {
       task(m.message || '烧录中…', m.progress);
       if (m.status === 'done') {
@@ -645,7 +646,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
 
   /** 异步：基于 accepted edits 切片段 → 拼接 → 可选烧录 → 导出 */
   const exportSpoken = (videoId: string, burnFlowerFlag: boolean, flower: string) => {
-    task('准备导出…', 5);
+    task('准备导出…', 5, { module: 'spoken', stage: 'flw', sel: videoId });
     submitSpokenExport(videoId, { burnFlower: burnFlowerFlag, flower }, (m) => {
       task(m.message || '导出中…', m.progress);
       if (m.status === 'done') {
@@ -771,7 +772,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
 
   /** 异步：自动写文案 */
   const genScript = async (projectId: string) => {
-    task('生成文案中…', 10);
+    task('生成文案中…', 10, { module: 'creation', stage: 'script', sel: projectId });
     submitScriptWrite(projectId, (m) => {
       task(m.message || '生成中…', m.progress);
       if (m.status === 'done') {
@@ -779,12 +780,14 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
         // 直接刷新 React state，避免 mock 路径下 list→proj 的二次更新时序问题
         set((s) => ({
           ...s,
+          creationSel: projectId,
+          cStage: 'script',
           creationProjects: s.creationProjects.map((p) => (p.id === projectId ? { ...p, script, status: 'writing' as const } : p)),
           cState: { ...s.cState, script },
-          cStage: 'human',
         }));
-        task('文案生成完成 ✓', 100);
-        setTimeout(() => task('空闲', 0), 1500);
+        // 生成文案后自动去 AI 味（用户无感），去味完成由 doHuman 内部跳到分镜
+        task('文案已生成，正在自动去 AI 味…', 60);
+        doHuman(projectId).catch(() => undefined);
       } else if (m.status === 'failed') {
         task('文案生成失败：' + (m.message || ''), 100);
       }
@@ -798,11 +801,11 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
       task(m.message || '去 AI 味中…', m.progress);
       if (m.status === 'done') {
         const human = (m.payload as any)?.human || '';
+        // 停留在「文案」页，让用户查看 / 编辑 / 保存；不再自动跳到分镜
         set((s) => ({
           ...s,
           creationProjects: s.creationProjects.map((p) => (p.id === projectId ? { ...p, humanizedScript: human, status: 'humanized' as const } : p)),
           cState: { ...s.cState, human },
-          cStage: 'story',
         }));
         task('去 AI 味完成 ✓', 100);
         setTimeout(() => task('空闲', 0), 1500);
@@ -813,7 +816,6 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
   };
 
   /** 同步：跳步（无异步任务） */
-  const goHuman = () => patch({ cStage: 'human' });
   const goStory = () => patch({ cStage: 'story' });
   const goImage = () => patch({ cStage: 'image' });
   const goFrames = () => patch({ cStage: 'frames' });
@@ -822,7 +824,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
 
   /** 异步：生成分镜 */
   const genStory = async (projectId: string) => {
-    task('生成分镜中…', 10);
+    task('生成分镜中…', 10, { module: 'creation', stage: 'story', sel: projectId });
     submitStoryboardGen(projectId, (m) => {
       task(m.message || '生成中…', m.progress);
       if (m.status === 'done') {
@@ -846,10 +848,15 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
     }).catch((e) => task('分镜生成失败：' + String(e), 100));
   };
 
-  /** 编辑单个分镜字段（实时写 state） */
-  const editStory = (i: number, f: string, v: string) => set((s) => ({
-    ...s, cState: { ...s.cState, story: s.cState.story.map((sh, k) => k === i ? { ...sh, [f]: f === 'dur' ? +v : v } : sh) },
-  }));
+  /** 编辑单个分镜字段（实时写 state，同步 cState.story 与 creationSb.shots） */
+  const editStory = (i: number, f: string, v: string) => set((s) => {
+    const val = f === 'dur' ? +v : v;
+    const story = s.cState.story.map((sh, k) => k === i ? { ...sh, [f]: val } : sh);
+    const creationSb = s.creationSb
+      ? { ...s.creationSb, shots: s.creationSb.shots.map((sh, k) => k === i ? { ...sh, [f]: val } : sh) }
+      : s.creationSb;
+    return { ...s, cState: { ...s.cState, story }, creationSb };
+  });
 
   /** 保存分镜到 storyboards 表（前端编辑后） */
   const persistStory = async (projectId: string) => {
@@ -862,6 +869,22 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
       await saveStoryboard(projectId, normalized, styleRef);
       task('分镜已保存 ✓', 100);
       await refreshCreation(projectId);
+    } catch (e) { task('保存失败：' + String(e), 100); }
+  };
+
+  /** 编辑并保存文案（去 AI 味后的终稿）到 creation_projects.script/humanized_script。 */
+  const saveScript = async (projectId: string, text: string) => {
+    const t = text.trim();
+    if (!t) { task('文案为空，无法保存', 100); return; }
+    try {
+      await updateCreationProject(projectId, { humanizedScript: t, status: 'humanized' });
+      set((s) => ({
+        ...s,
+        creationProjects: s.creationProjects.map((p) => p.id === projectId ? { ...p, humanizedScript: t } : p),
+        cState: { ...s.cState, human: t },
+      }));
+      task('文案已保存 ✓', 100);
+      setTimeout(() => task('空闲', 0), 1200);
     } catch (e) { task('保存失败：' + String(e), 100); }
   };
 
@@ -886,7 +909,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
   /** 异步：单镜图片生成 */
   const genImg = (projectId: string, i: number) => {
     const styleRef = get().cState.styleRef || '现实';
-    task('生成图片 ' + (i + 1) + '…', 10);
+    task('生成图片 ' + (i + 1) + '…', 10, { module: 'creation', stage: 'image', sel: projectId });
     submitImageGen(projectId, i, styleRef, (m) => {
       task(m.message || '生成中…', m.progress);
       if (m.status === 'done') {
@@ -903,7 +926,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
   /** M5-① 首尾帧视频：把各镜首帧图（图片步产物）生成运镜片段，可选尾帧做 crossfade。 */
   const genFrames = (projectId: string) => {
     const tails = get().cState.tails || {};
-    task('生成首尾帧视频中…', 10);
+    task('生成首尾帧视频中…', 10, { module: 'creation', stage: 'frames', sel: projectId });
     submitCreationFrames(projectId, tails, (m: ProgressMsg) => {
       task(m.message || '生成中…', m.progress);
       if (m.status === 'done') {
@@ -928,7 +951,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
   /** M5-② 配音：逐镜台词走 TTS 生成 wav（统一音色 voiceName）。 */
   const genVoice = (projectId: string) => {
     const voice = get().cState.voiceName || 'mimo_default';
-    task('生成配音中…', 10);
+    task('生成配音中…', 10, { module: 'creation', stage: 'voice', sel: projectId });
     submitCreationVoice(projectId, voice, (m: ProgressMsg) => {
       task(m.message || '生成中…', m.progress);
       if (m.status === 'done') {
@@ -964,7 +987,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
 
   /** M5-③ 导出成片：拼接 + 混音 + 烧字幕 → 最终 MP4。 */
   const exportCreation = (projectId: string, subtitleStyle: string) => {
-    task('导出成片中…', 5);
+    task('导出成片中…', 5, { module: 'creation', stage: 'export', sel: projectId });
     submitCreationExport(projectId, subtitleStyle, (m: ProgressMsg) => {
       task(m.message || '导出中…', m.progress);
       if (m.status === 'done') {
@@ -1067,7 +1090,7 @@ function buildActions(set: SetState, task: (l: string, p?: number) => void, get:
     pickSpokenFlower, burnFlower, exportSpoken, exportSpokenJianYing,
     // 创作
     loadCreation, refreshCreation, createCreation, deleteCreation,
-    genScript, goHuman, doHuman, goStory, genStory, editStory, persistStory,
+    genScript, doHuman, goStory, genStory, editStory, persistStory, saveScript,
     pickHumanPrompt, pickStyleRef,
     goImage, genImg, addRef, setRefCat, setRefCatItem, delRef, goFrames, genFrames,
     goVoice, genVoice, setCreationVoice, setCreationTail, clearCreationTail, goExport, exportCreation, downloadCreationSrt,
@@ -1081,8 +1104,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const stateRef = useRef<AppState>(state);
   stateRef.current = state;
   const taskTimer = useRef<number | undefined>(undefined);
-  const task = (label: string, p?: number) => {
-    setState((s) => ({ ...s, task: { label, p: p ?? s.task.p } }));
+  const task = (label: string, p?: number, nav?: TaskNav | null) => {
+    setState((s) => ({
+      ...s,
+      task: { label, p: p ?? s.task.p },
+      // 显式传 nav 时更新跳转目标；空闲时清空；否则沿用已有目标（进度回调不覆盖）。
+      taskNav: nav !== undefined ? nav : (label === '空闲' ? null : s.taskNav),
+    }));
     if (label === '空闲' && taskTimer.current) window.clearTimeout(taskTimer.current);
   };
   const actions = buildActions(setState, task, () => stateRef.current);

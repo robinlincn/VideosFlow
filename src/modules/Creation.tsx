@@ -8,14 +8,23 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
 const STEP_DESC: Record<string, string> = {
   req: '描述大体需求，自动写文案',
-  script: 'AI 自动写文案初稿',
-  human: '口语化去 AI 味',
+  script: 'AI 自动写文案初稿（生成后自动去 AI 味）',
   story: '生成可编辑的分镜文案',
   image: '按分镜生成图片（可加分类参考图）',
   frames: '按首帧图生成首尾帧视频（可加尾帧做过渡）',
   voice: '多声音配音 + 字幕',
   export: '合成与导出成片',
 };
+
+/** 需求页可一键选择的「标题 / 主题」模板，选中的内容即作为生成文案的依据。 */
+const REQ_PRESETS: string[] = [
+  '做一个60秒的科普视频，介绍 codex 的使用方法',
+  '做一个30秒的 AI 工具种草视频，面向新媒体运营',
+  '做一个2分钟的美食教程视频，教做番茄牛腩',
+  '做一个45秒的职场干货视频，讲高效开会的方法',
+  '做一个90秒的旅行 vlog，记录周末城市漫步',
+  '做一个60秒的产品发布会预告，主打轻薄便携',
+];
 
 /** 本地媒体预览源：桌面版经 fileserver（127.0.0.1）按需 Range 加载，浏览器态原样返回。 */
 function toSrc(p: string): string {
@@ -30,12 +39,21 @@ function toSrc(p: string): string {
 
 /** 把分镜源统一为「DB 态优先、编辑态回退」，并附带数组下标 i。 */
 type ViewShot = { index?: number; desc: string; dialogue: string; dur: number; cam: string; start?: number; end?: number; style?: string; _i: number };
+// 把分镜数据源规整为数组：兼容 creationSb.shots 为 JSON 字符串（DB 落库后未解析）或数组的情况，杜绝 .map 崩溃。
+function asShots(raw: any): any[] {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') {
+    try { const a = JSON.parse(raw); return Array.isArray(a) ? a : []; } catch { return []; }
+  }
+  return [];
+}
+
 function useShots(): { shots: ViewShot[]; ready: boolean } {
   const { state } = useApp();
   const { creationSb, cState } = state;
   const [ready, setReady] = useState(false);
   useEffect(() => { initVideoServer().then(() => setReady(true)); }, []);
-  const raw = (creationSb?.shots && creationSb.shots.length > 0) ? creationSb.shots : cState.story;
+  const raw = asShots((creationSb?.shots && creationSb.shots.length > 0) ? creationSb.shots : cState.story);
   const shots = raw.map((s, i) => ({ ...(s as object), _i: i }) as ViewShot);
   return { shots, ready };
 }
@@ -67,11 +85,10 @@ export default function Creation() {
       </div>
 
       {cStage === 'req' && <ReqView />}
-      {(cStage === 'script' || cStage === 'human' || cStage === 'story' || cStage === 'image' || cStage === 'frames' || cStage === 'voice' || cStage === 'export') && (
+      {(cStage === 'script' || cStage === 'story' || cStage === 'image' || cStage === 'frames' || cStage === 'voice' || cStage === 'export') && (
         !cur ? <div className="empty-hint">请先创建创作工程。</div> :
         <>
           {cStage === 'script' && <ScriptView proj={cur} />}
-          {cStage === 'human' && <HumanView proj={cur} />}
           {cStage === 'story' && <StoryView proj={cur} />}
           {cStage === 'image' && <ImageView proj={cur} />}
           {cStage === 'frames' && <FramesView proj={cur} />}
@@ -96,12 +113,47 @@ function StepPills({ current, onPick }: { current: string; onPick: (id: string) 
 }
 
 function ReqView() {
-  const { actions } = useApp();
+  const { state, actions } = useApp();
+  const { creationSel, creationProjects } = state;
+  const cur = creationProjects.find((p) => p.id === creationSel) || null;
+  const [brief, setBrief] = useState(cur?.brief || '');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  // 已选中已有工程：直接对其写文案，按钮不再新建
+  if (cur) {
+    return (
+      <div className="card" style={{ maxWidth: 760 }}>
+        <div className="sec-title">已选择工程 · {cur.brief.slice(0, 36) || '未命名'}</div>
+        <div className="muted sm" style={{ marginBottom: 12, lineHeight: 1.6 }}>
+          这个工程已经存在。要「给它写文案 / 重新写文案」点下面按钮即可；
+          若要用一个<b>全新的需求</b>另起一个工程，请先把上方「创作工程」下拉选回「（新建）」。
+        </div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button className="btn" disabled={busy} onClick={async () => { setBusy(true); try { await actions.genScript(cur.id); } finally { setBusy(false); } }}>✨ 给该工程写文案</button>
+          <button className="btn sm ghost" onClick={() => actions.set({ creationSel: null })}>↩ 切换回「新建」</button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="card" style={{ maxWidth: 760 }}>
-      <div className="sec-title">大体需求</div>
-      <div className="field"><label>主题 / 一句话需求</label>
-        <textarea id="brief" rows={4} placeholder="例如：做一个 60 秒的科普短视频，介绍 AI 视频剪辑，风格轻松活泼，面向新手"></textarea>
+      <div className="sec-title">大体需求（新建工程）</div>
+      <div className="muted sm" style={{ marginBottom: 12, lineHeight: 1.6 }}>
+        先选一个标题，或直接写下你的需求。这一步选中的「标题内容」就是后续文案 / 分镜 / 图片的生成依据。
+      </div>
+      <div className="req-presets">
+        {REQ_PRESETS.map((p) => (
+          <button
+            key={p}
+            className={'req-preset ' + (brief.trim() === p ? 'on' : '')}
+            onClick={() => { setBrief(p); if (err) setErr(''); }}
+          >{p}</button>
+        ))}
+      </div>
+      <div className="field" style={{ marginTop: 14 }}><label>主题 / 一句话需求 *</label>
+        <textarea value={brief} onChange={(e) => { setBrief(e.target.value); if (err) setErr(''); }} rows={4} placeholder="例如：做一个 60 秒的科普短视频，介绍 AI 视频剪辑，风格轻松活泼，面向新手"></textarea>
       </div>
       <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
         <div className="field"><label>风格</label><select><option>轻松活泼</option><option>专业沉稳</option><option>温情叙事</option><option>炫酷科技</option></select></div>
@@ -109,69 +161,83 @@ function ReqView() {
         <div className="field"><label>受众</label><select><option>新手</option><option>从业者</option><option>大众</option></select></div>
         <div className="field"><label>平台</label><select><option>抖音</option><option>视频号</option><option>B站</option><option>YouTube</option></select></div>
       </div>
-      <button className="btn" onClick={async () => {
-        const ta = document.getElementById('brief') as HTMLTextAreaElement | null;
-        const brief = ta?.value?.trim() || '';
-        if (!brief) { alert('请先填写需求'); return; }
-        const id = await actions.createCreation(brief);
-        if (id) await actions.genScript(id);
+      {err && <div style={{ color: '#dc2626', fontSize: 13, margin: '4px 0 10px' }}>⚠ {err}</div>}
+      <button className="btn" disabled={busy} onClick={async () => {
+        const b = brief.trim();
+        if (!b) { setErr('请先填写需求（一句话描述即可），再点「创建工程 + 自动写文案」。'); return; }
+        setErr(''); setBusy(true);
+        try {
+          const id = await actions.createCreation(b);
+          if (id) await actions.genScript(id);
+        } finally { setBusy(false); }
       }}>✨ 创建工程 + 自动写文案</button>
     </div>
   );
 }
 
 function ScriptView({ proj }: { proj: CreationProject }) {
-  const { state, actions } = useApp();
+  const { actions } = useApp();
+  const base = proj.humanizedScript || proj.script || '';
+  const [text, setText] = useState(base);
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { setText(base); setSaved(false); }, [base]);
+
+  const chars = text.replace(/\s/g, '').length;
+  const secs = Math.max(1, Math.round(chars / 4)); // 约 4 字/秒语速
+  const dirty = text.trim() !== base.trim();
+
+  const onSave = async () => {
+    setBusy(true);
+    try { await actions.saveScript(proj.id, text); setSaved(true); } finally { setBusy(false); }
+  };
+  const onRegen = async () => {
+    setBusy(true);
+    try { await actions.genScript(proj.id); } finally { setBusy(false); }
+  };
+
   return (
-    <div>
-      <div className="sec-title">自动写文案（初稿）</div>
-      <div className="script-box">{proj.script || state.cState.script || '尚未生成文案…'}</div>
-      <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
-        <button className="btn sm" disabled={!proj.script} onClick={() => actions.goHuman()}>下一步：去 AI 味 →</button>
-        <button className="btn sm ghost" onClick={() => actions.genScript(proj.id)}>🔄 重新生成</button>
+    <div className="script-edit">
+      <div className="sec-title">文案 · 自动去 AI 味后的终稿</div>
+      <div className="muted sm" style={{ margin: '2px 0 12px', lineHeight: 1.6 }}>
+        这段文案是「生成分镜 / 配音」的依据。可直接在此润色、保存——后续步骤都基于你确认后的文案。
+      </div>
+      <div className="script-edit__bar">
+        <div className="script-edit__stat"><b>{chars}</b> 字</div>
+        <div className="script-edit__stat"><b>{secs}</b> 秒 <span className="muted">（约 4 字/秒）</span></div>
+        <div className="script-edit__stat">状态：{proj.status}</div>
+        <div style={{ flex: 1 }} />
+        {saved && <span className="script-edit__ok">✓ 已保存</span>}
+        {dirty && !saved && <span className="script-edit__dirty">● 有未保存改动</span>}
+      </div>
+      <textarea
+        className="script-edit__area"
+        value={text}
+        onChange={(e) => { setText(e.target.value); if (saved) setSaved(false); }}
+        placeholder="点「创建工程 + 自动写文案」后，文案会生成在这里…"
+        spellCheck={false}
+      />
+      <div className="script-edit__acts">
+        <button className="btn" disabled={busy || !text.trim()} onClick={onSave}>💾 保存文案</button>
+        <button className="btn sm ghost" disabled={busy} onClick={onRegen}>🔄 重新生成</button>
+        <div style={{ flex: 1 }} />
+        <button className="btn sm" disabled={!text.trim()} onClick={() => actions.goStory()}>下一步：生成分镜 →</button>
       </div>
     </div>
   );
 }
 
-function HumanView({ proj }: { proj: CreationProject }) {
-  const { state, actions } = useApp();
-  const { cState, settingsState } = state;
-  const pt = settingsState.prompts;
-  const selTpl = cState.humanPrompt || 'humanize';
-  return (
-    <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
-      <div>
-        <div className="sec-title">去 AI 味前</div>
-        <div className="script-box" style={{ color: 'var(--muted)' }}>{proj.script || state.cState.script}</div>
-      </div>
-      <div>
-        <div className="sec-title">去 AI 味后（口语化）</div>
-        <div className="script-box">{proj.humanizedScript || state.cState.human || <span className="muted">点击「去 AI 味」生成</span>}</div>
-        <div className="field" style={{ marginTop: 10 }}>
-          <label>提示词模板</label>
-          <select value={selTpl} onChange={(e) => actions.pickHumanPrompt(e.target.value)}>
-            {Object.keys(pt).map((k) => <option key={k} value={k}>{pt[k].name}</option>)}
-          </select>
-        </div>
-        <div className="muted sm" style={{ margin: '4px 0 8px' }}>去 AI 味将使用「{pt[selTpl]?.name || 'humanize'}」模板对文案做口语化改写。</div>
-        <button className="btn sm" onClick={() => actions.doHuman(proj.id)}>🪄 去 AI 味</button>
-      </div>
-      <div style={{ marginTop: 12, gridColumn: '1 / -1' }}>
-        <button className="btn" disabled={!proj.humanizedScript} onClick={() => actions.goStory()}>下一步：生成分镜 →</button>
-      </div>
-    </div>
-  );
-}
+// 「去 AI 味」已合并进「文案」步自动执行（genScript 完成后自动 doHuman），不再作为独立页面展示。
 
 function StoryView({ proj }: { proj: CreationProject }) {
   const { state, actions } = useApp();
   const { cState, creationSb } = state;
   const sr = cState.styleRef || '现实';
   const sp = stylePresets[sr] || stylePresets['现实'];
-  const shots = (creationSb?.shots && creationSb.shots.length > 0) ? creationSb.shots : cState.story;
+  const rawShots = asShots((creationSb?.shots && creationSb.shots.length > 0) ? creationSb.shots : cState.story);
+  const shots = rawShots;
   return (
-    <div>
+    <div className="story-wrap">
       <div className="style-ref">
         <div className="ri">风格</div>
         <div style={{ flex: 1 }}>
@@ -189,17 +255,38 @@ function StoryView({ proj }: { proj: CreationProject }) {
       ) : (
         <>
           <div className="sec-title">分镜文案（{shots.length} 镜 · 可直接修改）</div>
-          {shots.map((s, i) => (
-            <div key={i} className="shot"><div className="body">
-              <div className="idx"><span className="tag spoken">镜头 {i + 1}</span>
-                <input className="mini" value={s.cam} onChange={(e) => actions.editStory(i, 'cam', e.target.value)} style={{ width: 90 }} placeholder="运镜" />
+          <div className="shot-list">
+            {shots.map((s, i) => {
+              const cam = s?.cam ?? '';
+              const dur = s?.dur ?? 4;
+              const desc = s?.desc ?? '';
+              const dialogue = s?.dialogue ?? '';
+              return (
+              <div key={i} className="shot-card">
+                <div className="shot-card__head">
+                  <span className="shot-card__no">镜头 {i + 1}</span>
+                  <div className="shot-card__ctrl">
+                    <span className="muted sm">运镜</span>
+                    <input className="mini" value={cam} onChange={(e) => actions.editStory(i, 'cam', e.target.value)} style={{ width: 84 }} placeholder="运镜" />
+                    <span className="muted sm">时长</span>
+                    <input className="mini" type="number" value={dur} onChange={(e) => actions.editStory(i, 'dur', e.target.value)} style={{ width: 52 }} />秒
+                  </div>
+                </div>
+                <div className="shot-card__body">
+                  <div className="shot-card__field">
+                    <label>画面描述</label>
+                    <textarea className="ed" rows={2} value={desc} onChange={(e) => actions.editStory(i, 'desc', e.target.value)} placeholder="描述这一镜的画面…" />
+                  </div>
+                  <div className="shot-card__field">
+                    <label>台词</label>
+                    <textarea className="ed" rows={2} value={dialogue} onChange={(e) => actions.editStory(i, 'dialogue', e.target.value)} placeholder="这一镜的配音台词…" />
+                  </div>
+                </div>
               </div>
-              <div className="ed-row"><label>画面</label><textarea className="ed" rows={2} value={s.desc} onChange={(e) => actions.editStory(i, 'desc', e.target.value)} /></div>
-              <div className="ed-row"><label>台词</label><textarea className="ed" rows={2} value={s.dialogue} onChange={(e) => actions.editStory(i, 'dialogue', e.target.value)} /></div>
-              <div className="meta"><span>⏱ <input className="mini" type="number" value={s.dur} onChange={(e) => actions.editStory(i, 'dur', e.target.value)} style={{ width: 46 }} />秒</span></div>
-            </div></div>
-          ))}
-          <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+              );
+            })}
+          </div>
+          <div className="story-actions">
             <button className="btn sm" onClick={() => actions.goImage()}>下一步：生成图片 →</button>
             <button className="btn sm ghost" onClick={() => actions.genStory(proj.id)}>🔄 重新生成分镜</button>
             <button className="btn sm ghost" onClick={() => actions.persistStory(proj.id)}>💾 保存到分镜</button>
@@ -213,7 +300,7 @@ function StoryView({ proj }: { proj: CreationProject }) {
 function ImageView({ proj }: { proj: CreationProject }) {
   const { state, actions } = useApp();
   const { cState, creationSb, creationAssets } = state;
-  const shots = (creationSb?.shots && creationSb.shots.length > 0) ? creationSb.shots : cState.story;
+  const shots = asShots((creationSb?.shots && creationSb.shots.length > 0) ? creationSb.shots : cState.story);
   const assetsByShot: Record<number, { path: string; size?: number }> = {};
   creationAssets.forEach((a) => { assetsByShot[a.shotId] = { path: a.path }; });
   const onAddRef = (i: number) => {

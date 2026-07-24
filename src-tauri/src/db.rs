@@ -240,8 +240,8 @@ pub async fn init(pool: &SqlitePool) -> Result<(), String> {
         "CREATE TABLE IF NOT EXISTS spoken_keywords(id TEXT PRIMARY KEY, video_id TEXT, text TEXT, weight REAL DEFAULT 1.0)",
         "CREATE TABLE IF NOT EXISTS spoken_matches(id TEXT PRIMARY KEY, video_id TEXT, seg_start REAL, seg_end REAL, seg_text TEXT, keyword TEXT, asset_id TEXT, applied INT DEFAULT 0)",
         "CREATE TABLE IF NOT EXISTS creation_projects(id TEXT PRIMARY KEY, brief TEXT, script TEXT, humanized_script TEXT, status TEXT, created_at INTEGER)",
-        "CREATE TABLE IF NOT EXISTS storyboards(id TEXT PRIMARY KEY, project_id TEXT, shots TEXT, style_ref TEXT)",
-        "CREATE TABLE IF NOT EXISTS generated_assets(id TEXT PRIMARY KEY, shot_id TEXT, kind TEXT, path TEXT, created_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS storyboards(id TEXT PRIMARY KEY, project_id TEXT, shots TEXT, style_ref TEXT, updated_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS generated_assets(id TEXT PRIMARY KEY, project_id TEXT, shot_id TEXT, kind TEXT, path TEXT, created_at INTEGER)",
         "CREATE TABLE IF NOT EXISTS voiceovers(id TEXT PRIMARY KEY, project_id TEXT, shot_id TEXT, voice_id TEXT, path TEXT)",
         "CREATE TABLE IF NOT EXISTS subtitles(id TEXT PRIMARY KEY, project_id TEXT, start REAL, end REAL, text TEXT, style_id TEXT)",
         "CREATE TABLE IF NOT EXISTS provider_config(id TEXT PRIMARY KEY, kind TEXT UNIQUE, name TEXT, provider TEXT, base_url TEXT, api_key TEXT, model TEXT, extra TEXT, enabled INT DEFAULT 1, has_key INTEGER DEFAULT 0, mode TEXT NOT NULL DEFAULT 'cloud')",
@@ -259,6 +259,14 @@ pub async fn init(pool: &SqlitePool) -> Result<(), String> {
         .execute(pool)
         .await;
     let _ = sqlx::query("ALTER TABLE film_projects ADD COLUMN analysis TEXT")
+        .execute(pool)
+        .await;
+    // 兼容旧库：storyboards 早期无 updated_at 列（storyboard_save 会写该列），按需补列。
+    let _ = sqlx::query("ALTER TABLE storyboards ADD COLUMN updated_at INTEGER")
+        .execute(pool)
+        .await;
+    // 兼容旧库：generated_assets 早期无 project_id 列（generated_assets_list / insert / delete 均写该列），按需补列。
+    let _ = sqlx::query("ALTER TABLE generated_assets ADD COLUMN project_id TEXT")
         .execute(pool)
         .await;
     seed_defaults(pool).await?;
